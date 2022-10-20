@@ -13,27 +13,20 @@ use std::{
 #[derive(Debug)]
 pub struct Epoll {
 	fd: RawFd,
-	userdata: Cell<u64>,
 }
 
 impl Epoll {
 	pub fn new() -> Result<Self> {
-		Ok(Self {
-			fd: epoll_create1(EpollCreateFlags::EPOLL_CLOEXEC).wrap_err("epoll_create failed")?,
-			userdata: Cell::new(0),
-		})
+		Ok(Self { fd: epoll_create1(EpollCreateFlags::EPOLL_CLOEXEC).wrap_err("epoll_create failed")? })
 	}
 
-	pub fn register<T: AsRawFd>(&self, io: T, flags: EpollFlags) -> Result<Polling<'_, T>> {
+	pub fn register<T: AsRawFd>(&self, io: T, flags: EpollFlags, key: u64) -> Result<Polling<'_, T>> {
 		let fd = io.as_raw_fd();
 		let flags = flags | EpollFlags::EPOLLET;
-		let ud = self.userdata.get();
-		self.userdata.set(ud + 1);
-		let mut event = Some(EpollEvent::new(flags, ud));
+		let mut event = Some(EpollEvent::new(flags, key));
 		epoll_ctl(self.fd, EpollOp::EpollCtlAdd, fd, &mut event)
 			.wrap_err("epoll_ctl adding a file descriptor failed")?;
-		println!("registered fd {} with userdata {}", fd, ud);
-		Ok(Polling { epoll: self, flags: Cell::new(flags), io: Some(io), userdata: ud })
+		Ok(Polling { epoll: self, flags: Cell::new(flags), io: Some(io), key })
 	}
 
 	pub fn wait<'e>(&self, events: &'e mut [EpollEvent], timeout: Option<Duration>) -> Result<&'e mut [EpollEvent]> {
@@ -59,11 +52,15 @@ impl Drop for Epoll {
 pub struct Polling<'e, T: AsRawFd> {
 	epoll: &'e Epoll,
 	flags: Cell<EpollFlags>,
-	userdata: u64,
 	io: Option<T>,
+	key: u64,
 }
 
 impl<'e, T: AsRawFd> Polling<'e, T> {
+	pub fn key(&self) -> u64 {
+		self.key
+	}
+
 	pub fn get_ref(&self) -> &T {
 		self.io.as_ref().unwrap()
 	}
@@ -81,7 +78,7 @@ impl<'e, T: AsRawFd> Polling<'e, T> {
 	}
 
 	pub fn reregister(&self, flags: EpollFlags) -> io::Result<()> {
-		let mut event = Some(EpollEvent::new(flags, self.userdata));
+		let mut event = Some(EpollEvent::new(flags, self.key));
 		epoll_ctl(self.epoll.fd, EpollOp::EpollCtlMod, self.as_raw_fd(), &mut event)?;
 		Ok(())
 	}

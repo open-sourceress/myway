@@ -7,4 +7,5 @@ description = "my personal Wayland compositor"
 [dependencies]
 clap = { version = "4.0.17", features = ["derive"] }
 eyre = "0.6.8"
-nix = { version = "0.25.0", default-features = false, features = ["event", "socket", "uio"] }
+nix = { version = "0.25.0", default-features = false, features = ["event", "signal", "socket", "uio"] }
+slab = "0.4.7"
