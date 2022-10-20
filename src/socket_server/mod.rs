@@ -1,3 +1,4 @@
+use self::buffer::Buffer;
 use log::{debug, trace, warn};
 use nix::{
 	sys::{
@@ -9,7 +10,6 @@ use nix::{
 };
 use slab::Slab;
 use std::{
-	fmt::{self, Debug, Formatter},
 	io::{ErrorKind, Read, Result, Write},
 	os::unix::{
 		io::{AsRawFd, RawFd},
@@ -18,6 +18,8 @@ use std::{
 	path::Path,
 	time::Duration,
 };
+
+mod buffer;
 
 /// Unix domain socket server that accepts connections on the wayland socket.
 ///
@@ -152,10 +154,10 @@ impl Drop for SocketServer {
 		match self.serv.local_addr() {
 			Ok(addr) => match addr.as_pathname() {
 				Some(path) => match std::fs::remove_file(path) {
-					Ok(()) => (),
+					Ok(()) => debug!("deleted server socket at {path:?}"),
 					Err(err) => warn!("deleting server socket failed: {err:?}"),
 				},
-				None => warn!("deleting server socket failed: local_addr is not a pathname"),
+				None => warn!("deleting server socket failed: local_addr ({addr:?}) is not a pathname"),
 			},
 			Err(err) => warn!("deleting server socket failed: local_addr failed: {err:?}"),
 		}
@@ -191,75 +193,36 @@ struct ClientStream {
 
 impl ClientStream {
 	fn tick(&mut self) -> Result<()> {
-		loop {
-			trace!("ticking {self:?}");
-			while !self.buf.data().is_empty() {
-				trace!("calling write(fd={}, buf=[len={}])", self.sock.as_raw_fd(), self.buf.data().len());
-				let n = self.sock.write(self.buf.data())?;
+		{
+			let mut space = self.buf.byte_space_mut();
+			while !space.is_empty() {
+				trace!("calling read(fd={}, buf=[len={}])", self.sock.as_raw_fd(), space.len());
+				let n = match self.sock.read(space) {
+					Ok(0) => return Ok(()), // TODO handle half-shutdown, is that a thing Unix sockets can do?
+					Ok(n) => n,
+					Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+					Err(err) => return Err(err),
+				};
+				trace!("read returned {n}");
+				self.buf.mark_bytes_filled(n);
+				space = self.buf.byte_space_mut();
+			}
+		}
+		{
+			let mut data = self.buf.byte_data();
+			while !data.is_empty() {
+				trace!("calling write(fd={}, buf=[len={}])", self.sock.as_raw_fd(), data.len());
+				let n = match self.sock.write(data) {
+					Ok(0) => return Err(ErrorKind::WriteZero.into()),
+					Ok(n) => n,
+					Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+					Err(err) => return Err(err),
+				};
 				trace!("write returned {n}");
-				if n == 0 {
-					return Err(ErrorKind::WriteZero.into());
-				}
-				self.buf.mark_consumed(n);
+				self.buf.mark_bytes_consumed(n);
+				data = self.buf.byte_data();
 			}
-			trace!("calling read(fd={}, buf=[len={}])", self.sock.as_raw_fd(), self.buf.space_mut().len());
-			let n = self.sock.read(self.buf.space_mut())?;
-			trace!("read returned {n}");
-			if n == 0 {
-				break Ok(());
-			}
-			self.buf.mark_filled(n);
 		}
-	}
-}
-
-/// Ring buffer of bytes
-#[derive(Clone)]
-struct Buffer {
-	/// heap-allocated buffer (initialized because working with uninit memory is unstable)
-	bytes: Box<[u8; Self::CAPACITY]>,
-	/// index of logically filled bytes to read from
-	copyout_idx: usize,
-	/// index of logically unfilled capacity to write into
-	copyin_idx: usize,
-}
-
-impl Buffer {
-	const CAPACITY: usize = 4096;
-
-	fn new() -> Self {
-		Self { bytes: Box::new([0; Self::CAPACITY]), copyout_idx: 0, copyin_idx: 0 }
-	}
-
-	fn data(&self) -> &[u8] {
-		&self.bytes[self.copyout_idx..self.copyin_idx]
-	}
-
-	fn mark_consumed(&mut self, len: usize) {
-		assert!(self.copyout_idx + len <= self.copyin_idx);
-		self.copyout_idx += len;
-		if self.copyout_idx == self.copyin_idx {
-			self.copyout_idx = 0;
-			self.copyin_idx = 0;
-		}
-	}
-
-	fn space_mut(&mut self) -> &mut [u8] {
-		&mut self.bytes[self.copyin_idx..]
-	}
-
-	fn mark_filled(&mut self, len: usize) {
-		assert!(self.copyin_idx + len <= Self::CAPACITY);
-		self.copyin_idx += len;
-	}
-}
-
-impl Debug for Buffer {
-	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		f.debug_struct("Buffer")
-			.field("capacity", &Self::CAPACITY)
-			.field("copyout_idx", &self.copyout_idx)
-			.field("copyin_idx", &self.copyin_idx)
-			.finish()
+		Err(ErrorKind::WouldBlock.into())
 	}
 }
