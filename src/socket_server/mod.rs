@@ -1,5 +1,5 @@
-use self::buffer::Buffer;
-use log::{debug, trace, warn};
+use self::client::ClientStream;
+use log::{debug, info, trace, warn};
 use nix::{
 	sys::{
 		epoll::{epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp},
@@ -10,16 +10,17 @@ use nix::{
 };
 use slab::Slab;
 use std::{
-	io::{ErrorKind, Read, Result, Write},
+	io::{ErrorKind, Result},
 	os::unix::{
 		io::{AsRawFd, RawFd},
-		net::{UnixListener, UnixStream},
+		net::UnixListener,
 	},
 	path::Path,
 	time::Duration,
 };
 
 mod buffer;
+mod client;
 
 /// Unix domain socket server that accepts connections on the wayland socket.
 ///
@@ -107,18 +108,23 @@ impl SocketServer {
 								)),
 							)?;
 							trace!("registered socket with epoll");
-							let client = entry.insert(ClientStream { sock, buf: Buffer::new() });
+							let client = entry.insert(ClientStream::new(sock));
 							trace!("put client into slab");
-							match client.tick() {
+							match client.maintain() {
 								Ok(()) => {
 									debug!("peer {key} closed connection");
 									self.clients.remove(key as usize);
+									continue;
 								},
 								Err(err) if err.kind() == ErrorKind::WouldBlock => (),
 								Err(err) => {
 									warn!("task {key} failed: {err:?}");
 									self.clients.remove(key as usize);
+									continue;
 								},
+							}
+							while let Some((id, op, args)) = client.read_message() {
+								info!("message for {id}! opcode={op}, args={args:?}");
 							}
 						},
 						Err(err) if err.kind() == ErrorKind::WouldBlock => break,
@@ -128,7 +134,7 @@ impl SocketServer {
 				Self::SIGNALFD_KEY => return Ok(true),
 				key => {
 					if let Some(client) = self.clients.get_mut(key as usize) {
-						match client.tick() {
+						match client.maintain() {
 							Ok(()) => {
 								debug!("peer {key} closed connection");
 								self.clients.remove(key as usize);
@@ -179,50 +185,5 @@ impl AsRawFd for Fd {
 impl Drop for Fd {
 	fn drop(&mut self) {
 		let _ = close(self.0);
-	}
-}
-
-/// State associated with a SocketServer client
-#[derive(Debug)]
-struct ClientStream {
-	/// Stream used to communicate with the client
-	sock: UnixStream,
-	/// Buffer of data read but not written back
-	buf: Buffer,
-}
-
-impl ClientStream {
-	fn tick(&mut self) -> Result<()> {
-		{
-			let mut space = self.buf.byte_space_mut();
-			while !space.is_empty() {
-				trace!("calling read(fd={}, buf=[len={}])", self.sock.as_raw_fd(), space.len());
-				let n = match self.sock.read(space) {
-					Ok(0) => return Ok(()), // TODO handle half-shutdown, is that a thing Unix sockets can do?
-					Ok(n) => n,
-					Err(err) if err.kind() == ErrorKind::WouldBlock => break,
-					Err(err) => return Err(err),
-				};
-				trace!("read returned {n}");
-				self.buf.mark_bytes_filled(n);
-				space = self.buf.byte_space_mut();
-			}
-		}
-		{
-			let mut data = self.buf.byte_data();
-			while !data.is_empty() {
-				trace!("calling write(fd={}, buf=[len={}])", self.sock.as_raw_fd(), data.len());
-				let n = match self.sock.write(data) {
-					Ok(0) => return Err(ErrorKind::WriteZero.into()),
-					Ok(n) => n,
-					Err(err) if err.kind() == ErrorKind::WouldBlock => break,
-					Err(err) => return Err(err),
-				};
-				trace!("write returned {n}");
-				self.buf.mark_bytes_consumed(n);
-				data = self.buf.byte_data();
-			}
-		}
-		Err(ErrorKind::WouldBlock.into())
 	}
 }

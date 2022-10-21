@@ -28,14 +28,6 @@ impl Buffer {
 		Self { buffer: Box::new([0; Self::CAPACITY_WORDS]), copyout_idx: Wrapping(0), copyin_idx: Wrapping(0) }
 	}
 
-	fn buffer_words(&self) -> &[u32; Self::CAPACITY_WORDS] {
-		&self.buffer
-	}
-
-	fn buffer_words_mut(&mut self) -> &mut [u32; Self::CAPACITY_WORDS] {
-		&mut self.buffer
-	}
-
 	fn buffer_bytes(&self) -> &[u8; Self::CAPACITY_BYTES] {
 		use std::mem::{align_of, size_of};
 		assert_eq!(size_of::<[u32; Self::CAPACITY_WORDS]>(), size_of::<[u8; Self::CAPACITY_BYTES]>());
@@ -79,6 +71,30 @@ impl Buffer {
 
 	pub(super) fn mark_bytes_filled(&mut self, len: usize) {
 		self.copyin_idx += len;
+	}
+
+	pub(super) fn read_message(&mut self) -> Option<(u32, u16, &[u32])> {
+		let (Wrapping(copyout_idx), Wrapping(copyin_idx)) = (self.copyout_idx, self.copyin_idx);
+		assert!(copyout_idx % 4 == 0, "copyout_idx ({copyout_idx}) is not word-aligned");
+		assert!(copyin_idx % 4 == 0, "copyin_idx ({copyin_idx}) is not word-aligned");
+		let (copyout_idx, copyin_idx) = (copyout_idx / 4, copyin_idx / 4);
+		let (&obj_id, &len_op, rest) = match &self.buffer[copyout_idx..copyin_idx] {
+			[a, b, rest @ ..] => (a, b, rest),
+			_ => return None,
+		};
+		let (byte_len, op) = {
+			let [hi1, hi2, lo1, lo2] = len_op.to_be_bytes();
+			(u16::from_be_bytes([hi1, hi2]), u16::from_be_bytes([lo1, lo2]))
+		};
+		if byte_len < 8 || byte_len % 4 != 0 {
+			todo!("reject client with invalid len");
+		}
+		let word_len = usize::from(byte_len / 4) - 2;
+		if rest.len() < word_len {
+			return None;
+		}
+		self.copyout_idx += 4 * (2 + word_len);
+		Some((obj_id, op, &rest[..word_len]))
 	}
 }
 
