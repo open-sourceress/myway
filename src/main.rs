@@ -1,12 +1,23 @@
-use self::socket_server::SocketServer;
+use self::{
+	accept::Accept,
+	client::Client,
+	epoll::{Epoll, Event, EPOLLIN, EPOLLOUT},
+	fds::{catch_sigint, Fd},
+};
 use clap::Parser;
-use log::{debug, info, trace};
+use log::{debug, info, trace, warn};
+use slab::Slab;
 use std::{
 	io::{self, ErrorKind},
 	path::PathBuf,
+	task::Poll,
 };
 
-mod socket_server;
+mod accept;
+mod client;
+mod epoll;
+mod fds;
+mod logger;
 
 /// Wayland compositor
 #[derive(Debug, Parser)]
@@ -16,9 +27,13 @@ struct Args {
 	socket_path: Option<PathBuf>,
 }
 
+/// Key (userdata) associated with the UnixListener in epoll
+const ACCEPT_KEY: u64 = u64::MAX;
+/// Key (userdata) associated with the signalfd in epoll
+const SIGNAL_KEY: u64 = u64::MAX - 1;
+
 fn main() -> io::Result<()> {
-	log::set_boxed_logger(Box::new(Logger(io::stderr()))).expect("logger should be set in main");
-	log::set_max_level(Logger::MAX_LEVEL);
+	logger::init();
 	let Args { socket_path } = Args::parse();
 	let socket_path = match socket_path {
 		Some(path) => path,
@@ -30,47 +45,140 @@ fn main() -> io::Result<()> {
 			path
 		},
 	};
-	info!("binding to {socket_path:?}");
-	let mut server = SocketServer::bind(socket_path)?;
-	loop {
-		trace!("ticking socket server");
-		if server.wait(None)? {
-			break;
+	let epoll = Epoll::new()?;
+
+	info!("listening at {}", socket_path.display());
+	let accept = Accept::bind(socket_path)?;
+	epoll.register(&accept, EPOLLIN, ACCEPT_KEY)?;
+	trace!("registered acceptor with epoll");
+
+	let sigfd = catch_sigint()?;
+	epoll.register(&sigfd, EPOLLIN, SIGNAL_KEY)?;
+	trace!("registered signalfd with epoll");
+
+	let mut clients = Slab::new();
+
+	let mut events = [Event::empty(); 32];
+	let mut event_serial = 0;
+	'run: loop {
+		for event in epoll.wait_for_activity(&mut events, None)? {
+			match event.data() {
+				ACCEPT_KEY => {
+					while let Poll::Ready(sock) = accept.poll_accept()? {
+						let entry = clients.vacant_entry();
+						let key = entry.key();
+						epoll.register(&sock, EPOLLIN | EPOLLOUT, key as u64)?;
+						trace!("registered socket with epoll (client key {key})");
+						entry.insert(Client::new(sock));
+						poll_client(&mut clients, &mut event_serial, key); // immediately poll until pending
+					}
+				},
+				SIGNAL_KEY => break 'run,
+				key => poll_client(&mut clients, &mut event_serial, key as usize),
+			}
 		}
 	}
+
 	debug!("exiting on SIGINT");
 	Ok(())
 }
 
-struct Logger(io::Stderr);
-
-#[cfg(debug_assertions)]
-impl Logger {
-	const MAX_LEVEL: log::LevelFilter = log::LevelFilter::Trace;
-}
-
-#[cfg(not(debug_assertions))]
-impl Logger {
-	const MAX_LEVEL: log::LevelFilter = log::LevelFilter::Info;
-}
-
-impl log::Log for Logger {
-	fn enabled(&self, metadata: &log::Metadata) -> bool {
-		metadata.level() <= Self::MAX_LEVEL
-	}
-
-	fn log(&self, record: &log::Record) {
-		use std::io::{LineWriter, Write as _};
-		if !self.enabled(record.metadata()) {
-			return;
+macro_rules! wire_event {
+	(id = $id:expr, op = $op:expr) => { wire_event![id=$id, op=$op;]};
+	(id = $id:expr, op = $op:expr; $($arg:expr),* $(,)?) => {
+		{
+			let mut words = [$id, $op, $($arg,)*];
+			words[1] |= (words.len() as u32) << 18;
+			words
 		}
-		let mut dest = LineWriter::new(self.0.lock());
-		let _ = writeln!(dest, "[{level:<5}] {args}", level = record.level(), args = record.args());
-		let _ = dest.flush();
 	}
+}
 
-	fn flush(&self) {
-		use std::io::Write as _;
-		let _ = (&self.0).flush();
+fn poll_client(clients: &mut Slab<Client>, event_serial: &mut u32, key: usize) {
+	let client = match clients.get_mut(key) {
+		Some(c) => c,
+		None => {
+			warn!("epoll produced unknown key {key}?");
+			return;
+		},
+	};
+	loop {
+		let (oid, op, args) = match client.poll_recv() {
+			Poll::Ready(Ok(req)) => req,
+			Poll::Ready(Err(err)) => {
+				warn!("client {key} errored, dropping connection: {err:?}");
+				clients.remove(key);
+				return;
+			},
+			Poll::Pending => break,
+		};
+		info!("message for {oid}! opcode={op}, args={args:?}");
+		match (oid, op, args) {
+			(1, 0, &[cb_id]) => {
+				info!("wl_display::sync(callback={cb_id})");
+				let serial = *event_serial;
+				*event_serial += 1;
+				client.submit(&wire_event![id=cb_id, op=0; serial]).unwrap();
+			},
+			(1, 1, &[reg_id]) => {
+				info!("wl_display::get_registry(registry={reg_id})");
+				// issue registry::global (op 0) events for some made-up globals
+				// args: name:uint, interface:string, version:uint
+				client
+					.submit(&wire_event![
+						id=reg_id, op=0;
+						0, // name: uint
+						14, // interface: string (len)
+						u32::from_ne_bytes(*b"wl_c"),
+						u32::from_ne_bytes(*b"ompo"),
+						u32::from_ne_bytes(*b"sito"),
+						u32::from_ne_bytes(*b"r\0\0\0"),
+						5, // version: uint
+					])
+					.unwrap();
+				client
+					.submit(&wire_event![
+						id=reg_id, op=0;
+						1, // name: uint
+						7, // interface: string (len)
+						u32::from_ne_bytes(*b"wl_s"),
+						u32::from_ne_bytes(*b"hm\0\0"),
+						1, // version: uint
+					])
+					.unwrap();
+				client
+					.submit(&wire_event![
+						id=reg_id, op=0;
+						2, // name: uint
+						23, // interface: string (len)
+						u32::from_ne_bytes(*b"wl_d"),
+						u32::from_ne_bytes(*b"ata_"),
+						u32::from_ne_bytes(*b"devi"),
+						u32::from_ne_bytes(*b"ce_m"),
+						u32::from_ne_bytes(*b"anag"),
+						u32::from_ne_bytes(*b"er\0\0"),
+						3, // version: uint
+					])
+					.unwrap();
+			},
+			_ => (),
+		};
+	}
+	trace!("flushing buffers");
+	match client.poll_flush() {
+		Poll::Ready(Ok(())) => (),
+		Poll::Ready(Err(err)) => {
+			warn!("client {key} errored, dropping connection: {err:?}");
+			clients.remove(key);
+		},
+		Poll::Pending => (),
+	}
+}
+
+fn cvt_poll<T, E: Into<io::Error>>(res: Result<T, E>) -> Poll<io::Result<T>> {
+	match res.map_err(E::into) {
+		Ok(x) => Poll::Ready(Ok(x)),
+		Err(err) if err.kind() == ErrorKind::WouldBlock => Poll::Pending,
+		Err(err) => Poll::Ready(Err(err)),
 	}
 }
