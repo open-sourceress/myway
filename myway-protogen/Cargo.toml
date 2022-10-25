@@ -1,0 +1,9 @@
+[package]
+name = "myway-protogen"
+version = { workspace = true }
+edition = { workspace = true }
+description = "turn XML Wayland protocol files into Rust code for myway"
+
+[dependencies]
+roxmltree = "0.15.1"
+xmltree = "0.10.3"
