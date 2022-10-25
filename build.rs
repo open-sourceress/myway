@@ -1,7 +1,7 @@
-use std::{env, path::PathBuf};
+use std::{env, io::Result, path::PathBuf};
 
-fn main() {
+fn main() -> Result<()> {
 	let mut path = PathBuf::from(env::var_os("OUT_DIR").unwrap());
 	path.push("wayland_protocol.rs");
-	myway_protogen::generate("/usr/share/wayland/wayland.xml", path).unwrap();
+	myway_protogen::generate("/usr/share/wayland/wayland.xml", path)
 }
