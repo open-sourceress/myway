@@ -50,7 +50,7 @@ impl Epoll {
 pub type Interest = EpollFlags;
 pub const EPOLLIN: Interest = EpollFlags::EPOLLIN;
 pub const EPOLLOUT: Interest = EpollFlags::EPOLLOUT;
-//pub const EPOLLPRI: Interest = EpollFlags::EPOLLPRI;
-//pub const EPOLLERR: Interest = EpollFlags::EPOLLERR;
-//pub const EPOLLRDHUP: Interest = EpollFlags::EPOLLRDHUP;
-//pub const EPOLLHUP: Interest = EpollFlags::EPOLLHUP;
+// pub const EPOLLPRI: Interest = EpollFlags::EPOLLPRI;
+// pub const EPOLLERR: Interest = EpollFlags::EPOLLERR;
+// pub const EPOLLRDHUP: Interest = EpollFlags::EPOLLRDHUP;
+// pub const EPOLLHUP: Interest = EpollFlags::EPOLLHUP;

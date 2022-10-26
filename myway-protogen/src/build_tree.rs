@@ -1,4 +1,4 @@
-use crate::types::{ArgType, Description, Enum, Entry, Arg, Interface, Message, Protocol};
+use crate::types::{Arg, ArgType, Description, Entry, Enum, Interface, Message, Protocol};
 use roxmltree::{Attribute, Document, Node, NodeType};
 use std::{io::Result, num::NonZeroU32};
 
@@ -107,7 +107,8 @@ fn build_message<'doc>(node: Node<'doc, '_>) -> Result<Message<'doc>> {
 	let mut args = Vec::new();
 	while let Some(elem) = children.next_assert("arg")? {
 		let arg = build_arg(elem)?;
-		// This mimics the behavior of wayland-scanner and matches the signature of requests marshalled by wayland-client.h
+		// This mimics the behavior of wayland-scanner and matches the signature of requests marshalled by
+		// wayland-client.h
 		if matches!(arg.ty, ArgType::NewId { interface: None }) {
 			args.push(Arg {
 				name: "interface",
@@ -139,7 +140,11 @@ fn build_arg<'doc>(node: Node<'doc, '_>) -> Result<Arg<'doc>> {
 		("new_id", interface, false, None) => ArgType::NewId { interface },
 		("array", None, false, None) => ArgType::Array,
 		("fd", None, false, None) => ArgType::Fd,
-		(ty, inf, null, en) => bail!("invalid combination of type attributes for <arg> at {:?}: type={ty:?}, interface={inf:?}, nullable={null:?}, enum={en:?}", node.range()),
+		(ty, inf, null, en) => bail!(
+			"invalid combination of type attributes for <arg> at {:?}: type={ty:?}, interface={inf:?}, \
+			 nullable={null:?}, enum={en:?}",
+			node.range()
+		),
 	};
 	Ok(Arg { name, ty, summary })
 }

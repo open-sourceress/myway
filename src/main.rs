@@ -18,6 +18,7 @@ mod client;
 mod epoll;
 mod fds;
 mod logger;
+mod protocol;
 
 /// Wayland compositor
 #[derive(Debug, Parser)]
