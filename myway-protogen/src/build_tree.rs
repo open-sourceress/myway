@@ -132,8 +132,9 @@ fn build_arg<'doc>(node: Node<'doc, '_>) -> Result<Arg<'doc>> {
 	let ty = match (r#type, interface, allow_null.unwrap_or_default(), r#enum) {
 		("int", None, false, None) => ArgType::Int,
 		// <arg type="int" enum="wl_output.transform" /> exists in a few places for unknown reasons
-		("int", None, false, Some(en)) => ArgType::Uint { r#enum: Some(en) },
-		("uint", None, false, en) => ArgType::Uint { r#enum: en },
+		("int", None, false, Some(en)) => ArgType::Enum(en),
+		("uint", None, false, None) => ArgType::Uint,
+		("uint", None, false, Some(en)) => ArgType::Enum(en),
 		("fixed", None, false, None) => ArgType::Fixed,
 		("string", None, nullable, None) => ArgType::String { nullable },
 		("object", interface, nullable, None) => ArgType::Object { interface, nullable },

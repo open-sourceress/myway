@@ -1,4 +1,4 @@
-use crate::cvt_poll;
+use crate::{cvt_poll, object_impls::Display};
 use log::trace;
 use std::{
 	fmt,
@@ -38,13 +38,101 @@ pub struct Client {
 	tx: Buffer,
 	/// Buffered messages to be processed
 	rx: Buffer,
+	display: Option<Display>,
 }
 
 impl Client {
 	pub fn new(sock: UnixStream) -> Self {
-		Self { sock, tx: Buffer::new(), rx: Buffer::new() }
+		Self { sock, tx: Buffer::new(), rx: Buffer::new(), display: Some(Display) }
 	}
 
+	pub fn split_mut(&mut self) -> (SendHalf<'_>, RecvHalf<'_>, &mut Option<Display>) {
+		(
+			SendHalf { sock: &self.sock, buf: &mut self.tx },
+			RecvHalf { sock: &self.sock, buf: &mut self.rx },
+			&mut self.display,
+		)
+	}
+}
+
+#[derive(Debug)]
+pub struct SendHalf<'c> {
+	sock: &'c UnixStream,
+	buf: &'c mut Buffer,
+}
+
+impl<'c> SendHalf<'c> {
+	/// Submit an event or error to this client.
+	///
+	/// Submission is atomic: either the message is enqueued in full and the method returns `Ok`, or the message was
+	/// not queued and this method returns `Err`. The message is never partially enqueued.
+	///
+	/// This method appends the message content to an internal buffer, flushing bytes from that buffer to the client
+	/// only if necessary to fit the provided message. To ensure messages are delivered in a timely manner, call
+	/// [`poll_flush`](Self::poll_flush) after this method.
+	pub fn submit(&mut self, message: &[Word]) -> Result<()> {
+		let byte_len = message.len() * WORD_SIZE;
+		trace!("submitting message of {byte_len} bytes");
+		assert!(byte_len <= CAP_BYTES, "cannot write {byte_len} bytes into a buffer of {CAP_BYTES} bytes");
+
+		// if there isn't enough space, try flushing some buffered bytes to make room
+		if CAP_BYTES - self.buf.write_idx < byte_len {
+			trace!("no room for {byte_len}-byte message, trying to make space");
+			match self.poll_flush() {
+				Poll::Ready(Ok(())) => (),
+				Poll::Ready(Err(err)) => return Err(err),
+				Poll::Pending => {
+					// Some bytes are left in the buffer. Move them to the front to try to make room. Only move whole
+					// words to ensure write_idx is always word-aligned.
+					let buf = &mut self.buf;
+					let start = buf.read_idx / WORD_SIZE; // intentional truncation
+					let end = div_exact(buf.write_idx, "write_idx");
+					trace!("moving unflushed data at {}..{} forward by {} words", buf.read_idx, buf.write_idx, start);
+					buf.buf.copy_within(start..end, 0);
+					buf.read_idx -= start * WORD_SIZE;
+					buf.write_idx -= start * WORD_SIZE;
+					trace!("data moved to {}..{}", buf.read_idx, buf.write_idx);
+				},
+			}
+		}
+		// if there's still no room, assume the client is running very slow and don't wait for them to catch up
+		if CAP_BYTES - self.buf.write_idx < byte_len {
+			return Err(Error::new(ErrorKind::Other, "unable to reserve buffer space for a message"));
+		}
+		let buf = &mut self.buf;
+		let start = div_exact(buf.write_idx, "write_idx");
+		buf.buf[start..start + message.len()].copy_from_slice(message);
+		trace!("wrote message to buffer, bytes {}..{}", start * WORD_SIZE, (start + message.len()) * WORD_SIZE);
+		buf.write_idx += byte_len;
+		Ok(())
+	}
+
+	/// Flush buffered messages, delivering them to the client. Returns `Ready(Ok(()))` if the buffer was flushed
+	/// completely, or `Pending` if there are still messages to deliver.
+	pub fn poll_flush(&mut self) -> Poll<Result<()>> {
+		let buf = &mut self.buf;
+		let bytes = Buffer::bytes(&buf.buf);
+		while buf.read_idx < buf.write_idx {
+			let data = &bytes[buf.read_idx..buf.write_idx];
+			trace!("> write(fd={}, buf=[len={}])", self.sock.as_raw_fd(), data.len());
+			let n = ready!(cvt_poll(self.sock.write(data)))?;
+			trace!("< {n}");
+			if n == 0 {
+				return Poll::Ready(Err(ErrorKind::WriteZero.into()));
+			}
+			buf.read_idx += n;
+		}
+		cvt_poll(self.sock.flush())
+	}
+}
+
+#[derive(Debug)]
+pub struct RecvHalf<'c> {
+	sock: &'c UnixStream,
+	buf: &'c mut Buffer,
+}
+
+impl<'c> RecvHalf<'c> {
 	/// Receive a request from this client, if one is ready.
 	///
 	/// Returns `(object_id, opcode, arg_words)`. Parsing `arg_words` into request arguments is left to the caller.
@@ -72,7 +160,7 @@ impl Client {
 	fn fill_words(&mut self, word_len: usize, consume: bool) -> Poll<Result<&[Word]>> {
 		let byte_len = word_len * WORD_SIZE;
 		assert!(byte_len < CAP_BYTES, "cannot read {byte_len} bytes into a buffer of {CAP_BYTES} bytes");
-		let buf = &mut self.rx;
+		let buf = &mut self.buf;
 		let bytes = Buffer::bytes_mut(&mut buf.buf);
 		while buf.write_idx - buf.read_idx < byte_len {
 			let space = &mut bytes[buf.write_idx..];
@@ -91,69 +179,6 @@ impl Client {
 			buf.read_idx += word_len * WORD_SIZE;
 		}
 		Poll::Ready(Ok(&buf.buf[start..start + word_len]))
-	}
-
-	/// Submit an event or error to this client.
-	///
-	/// Submission is atomic: either the message is enqueued in full and the method returns `Ok`, or the message was
-	/// not queued and this method returns `Err`. The message is never partially enqueued.
-	///
-	/// This method appends the message content to an internal buffer, flushing bytes from that buffer to the client
-	/// only if necessary to fit the provided message. To ensure messages are delivered in a timely manner, call
-	/// [`poll_flush`](Self::poll_flush) after this method.
-	pub fn submit(&mut self, message: &[Word]) -> Result<()> {
-		let byte_len = message.len() * WORD_SIZE;
-		trace!("submitting message of {byte_len} bytes");
-		assert!(byte_len <= CAP_BYTES, "cannot write {byte_len} bytes into a buffer of {CAP_BYTES} bytes");
-
-		// if there isn't enough space, try flushing some buffered bytes to make room
-		if CAP_BYTES - self.tx.write_idx < byte_len {
-			trace!("no room for {byte_len}-byte message, trying to make space");
-			match self.poll_flush() {
-				Poll::Ready(Ok(())) => (),
-				Poll::Ready(Err(err)) => return Err(err),
-				Poll::Pending => {
-					// Some bytes are left in the buffer. Move them to the front to try to make room. Only move whole
-					// words to ensure write_idx is always word-aligned.
-					let buf = &mut self.tx;
-					let start = buf.read_idx / WORD_SIZE; // intentional truncation
-					let end = div_exact(buf.write_idx, "write_idx");
-					trace!("moving unflushed data at {}..{} forward by {} words", buf.read_idx, buf.write_idx, start);
-					buf.buf.copy_within(start..end, 0);
-					buf.read_idx -= start * WORD_SIZE;
-					buf.write_idx -= start * WORD_SIZE;
-					trace!("data moved to {}..{}", buf.read_idx, buf.write_idx);
-				},
-			}
-		}
-		// if there's still no room, assume the client is running very slow and don't wait for them to catch up
-		if CAP_BYTES - self.tx.write_idx < byte_len {
-			return Err(Error::new(ErrorKind::Other, "unable to reserve buffer space for a message"));
-		}
-		let buf = &mut self.tx;
-		let start = div_exact(buf.write_idx, "write_idx");
-		buf.buf[start..start + message.len()].copy_from_slice(message);
-		trace!("wrote message to buffer, bytes {}..{}", start * WORD_SIZE, (start + message.len()) * WORD_SIZE);
-		buf.write_idx += byte_len;
-		Ok(())
-	}
-
-	/// Flush buffered messages, delivering them to the client. Returns `Ready(Ok(()))` if the buffer was flushed
-	/// completely, or `Pending` if there are still messages to deliver.
-	pub fn poll_flush(&mut self) -> Poll<Result<()>> {
-		let buf = &mut self.tx;
-		let bytes = Buffer::bytes(&buf.buf);
-		while buf.read_idx < buf.write_idx {
-			let data = &bytes[buf.read_idx..buf.write_idx];
-			trace!("> write(fd={}, buf=[len={}])", self.sock.as_raw_fd(), data.len());
-			let n = ready!(cvt_poll(self.sock.write(data)))?;
-			trace!("< {n}");
-			if n == 0 {
-				return Poll::Ready(Err(ErrorKind::WriteZero.into()));
-			}
-			buf.read_idx += n;
-		}
-		cvt_poll(self.sock.flush())
 	}
 }
 

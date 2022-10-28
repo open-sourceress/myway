@@ -26,8 +26,9 @@ fn emit_interface(dest: &mut impl Write, iface: &Interface) -> Result<()> {
 	// requests, as a trait of handlers
 	let type_name = RustName(iface.name);
 	writeln!(dest, "pub mod {} {{", iface.name)?;
-	writeln!(dest, "\tuse std::{{io::Result, num::NonZeroU32, os::unix::io::OwnedFd}};")?;
-	writeln!(dest, "\tpub trait {type_name}Requests {{")?;
+	writeln!(dest, "\tuse crate::protocol::{{Fixed, FromArgs}};")?;
+	writeln!(dest, "\tuse std::{{io::{{self, ErrorKind, Result}}, num::NonZeroU32, os::unix::io::OwnedFd}};")?;
+	writeln!(dest, "\tpub trait {type_name}Requests: Sized {{")?;
 	for req in &iface.requests {
 		if let Some(desc) = req.desc {
 			write_multiline(dest, "\t\t/// ", [desc.summary, desc.description])?;
@@ -49,15 +50,42 @@ fn emit_interface(dest: &mut impl Write, iface: &Interface) -> Result<()> {
 		}
 		writeln!(dest, ") -> Result<()>;")?;
 	}
+	writeln!(dest, "\t\t#[allow(clippy::match_single_binding)]")?;
+	writeln!(dest, "\t\tfn handle_request(this: &mut Option<Self>, opcode: u16, args: &[u32]) -> Result<()> {{")?;
+	writeln!(dest, "\t\t\tmatch opcode {{")?;
+	for (i, req) in iface.requests.iter().enumerate() {
+		writeln!(dest, "\t\t\t\t{i} => {{")?;
+		for arg in &req.args {
+			writeln!(dest, "\t\t\t\t\tlet ({}, args) = <{}>::split(args)?;", arg.name, RustType(arg.ty))?;
+		}
+		writeln!(dest, "\t\t\t\t\tif !args.is_empty() {{")?;
+		writeln!(dest, "\t\t\t\t\t\treturn Err(io::Error::new(ErrorKind::InvalidInput, \"too many args\"));")?;
+		writeln!(dest, "\t\t\t\t\t}}")?;
+		if req.kind == Some("destructor") {
+			write!(dest, "\t\t\t\t\tthis.take().unwrap().handle_{}(", req.name)?;
+		} else {
+			write!(dest, "\t\t\t\t\tthis.as_mut().unwrap().handle_{}(", req.name)?;
+		}
+		for arg in &req.args {
+			write!(dest, "{}, ", arg.name)?;
+		}
+		writeln!(dest, ")")?;
+		writeln!(dest, "\t\t\t\t}},")?;
+	}
+	// suppress unused_variables for `this` and `args` without enabling the lint for the entire function
+	writeln!(dest, "\t\t\t\t_ => {{ let _ = (this, args); Err(ErrorKind::InvalidInput.into()) }},")?;
+	writeln!(dest, "\t\t\t}}")?;
+	writeln!(dest, "\t\t}}")?;
 	writeln!(dest, "\t}}")?;
 
 	for en in &iface.enums {
+		let name = RustName(en.name);
 		if let Some(desc) = en.desc {
 			write_multiline(dest, "\t/// ", [desc.summary, desc.description])?;
 		}
 		writeln!(dest, "\t#[repr(u32)]")?;
 		writeln!(dest, "\t#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]")?;
-		writeln!(dest, "\tpub enum {} {{", RustName(en.name))?;
+		writeln!(dest, "\tpub enum {name} {{")?;
 		for ent in &en.entries {
 			if let Some(doc) = ent.summary {
 				writeln!(dest, "\t\t/// {doc}")?;
@@ -70,6 +98,18 @@ fn emit_interface(dest: &mut impl Write, iface: &Interface) -> Result<()> {
 			}
 		}
 		writeln!(dest, "\t}}")?;
+		writeln!(dest, "\timpl<'a> FromArgs<'a> for {name} {{")?;
+		writeln!(dest, "\t\tfn split(args: &'a [u32]) -> Result<(Self, &'a [u32])> {{")?;
+		writeln!(dest, "\t\t\tlet (arg, rest) = u32::split(args)?;")?;
+		writeln!(dest, "\t\t\tlet arg = match arg {{")?;
+		for ent in &en.entries {
+			writeln!(dest, "\t\t\t\t{} => Self::{},", ent.value, RustName(ent.name))?;
+		}
+		writeln!(dest, "\t\t\t\t_ => return Err(io::Error::new(ErrorKind::InvalidInput, \"invalid {name}\")),")?;
+		writeln!(dest, "\t\t\t}};")?; // match
+		writeln!(dest, "\t\t\tOk((arg, rest))")?;
+		writeln!(dest, "\t\t}}")?; // fn
+		writeln!(dest, "\t}}")?; // trait impl
 	}
 
 	writeln!(dest, "}}")?;
@@ -134,8 +174,8 @@ impl Display for RustType<'_> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		match self.0 {
 			ArgType::Int => f.write_str("i32"),
-			ArgType::Uint { r#enum: None } => f.write_str("u32"),
-			ArgType::Uint { r#enum: Some(wl_name) } => RustName(wl_name).fmt(f),
+			ArgType::Uint => f.write_str("u32"),
+			ArgType::Enum(wl_name) => RustName(wl_name).fmt(f),
 			ArgType::Fixed => f.write_str("Fixed"),
 			ArgType::String { nullable: false } => f.write_str("&str"),
 			ArgType::String { nullable: true } => f.write_str("Option<&str>"),

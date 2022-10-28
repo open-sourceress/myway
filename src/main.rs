@@ -18,6 +18,7 @@ mod client;
 mod epoll;
 mod fds;
 mod logger;
+mod object_impls;
 mod protocol;
 
 /// Wayland compositor
@@ -103,8 +104,9 @@ fn poll_client(clients: &mut Slab<Client>, event_serial: &mut u32, key: usize) {
 			return;
 		},
 	};
+	let (mut send, mut recv, obj) = client.split_mut();
 	loop {
-		let (oid, op, args) = match client.poll_recv() {
+		let (oid, op, args) = match recv.poll_recv() {
 			Poll::Ready(Ok(req)) => req,
 			Poll::Ready(Err(err)) => {
 				warn!("client {key} errored, dropping connection: {err:?}");
@@ -114,59 +116,59 @@ fn poll_client(clients: &mut Slab<Client>, event_serial: &mut u32, key: usize) {
 			Poll::Pending => break,
 		};
 		info!("message for {oid}! opcode={op}, args={args:?}");
+		if oid == 1 {
+			crate::protocol::wayland::wl_display::WlDisplayRequests::handle_request(obj, op, args).unwrap();
+		}
 		match (oid, op, args) {
 			(1, 0, &[cb_id]) => {
 				info!("wl_display::sync(callback={cb_id})");
 				let serial = *event_serial;
 				*event_serial += 1;
-				client.submit(&wire_event![id=cb_id, op=0; serial]).unwrap();
+				send.submit(&wire_event![id=cb_id, op=0; serial]).unwrap();
 			},
 			(1, 1, &[reg_id]) => {
 				info!("wl_display::get_registry(registry={reg_id})");
 				// issue registry::global (op 0) events for some made-up globals
 				// args: name:uint, interface:string, version:uint
-				client
-					.submit(&wire_event![
-						id=reg_id, op=0;
-						0, // name: uint
-						14, // interface: string (len)
-						u32::from_ne_bytes(*b"wl_c"),
-						u32::from_ne_bytes(*b"ompo"),
-						u32::from_ne_bytes(*b"sito"),
-						u32::from_ne_bytes(*b"r\0\0\0"),
-						5, // version: uint
-					])
-					.unwrap();
-				client
-					.submit(&wire_event![
-						id=reg_id, op=0;
-						1, // name: uint
-						7, // interface: string (len)
-						u32::from_ne_bytes(*b"wl_s"),
-						u32::from_ne_bytes(*b"hm\0\0"),
-						1, // version: uint
-					])
-					.unwrap();
-				client
-					.submit(&wire_event![
-						id=reg_id, op=0;
-						2, // name: uint
-						23, // interface: string (len)
-						u32::from_ne_bytes(*b"wl_d"),
-						u32::from_ne_bytes(*b"ata_"),
-						u32::from_ne_bytes(*b"devi"),
-						u32::from_ne_bytes(*b"ce_m"),
-						u32::from_ne_bytes(*b"anag"),
-						u32::from_ne_bytes(*b"er\0\0"),
-						3, // version: uint
-					])
-					.unwrap();
+				send.submit(&wire_event![
+					id=reg_id, op=0;
+					0, // name: uint
+					14, // interface: string (len)
+					u32::from_ne_bytes(*b"wl_c"),
+					u32::from_ne_bytes(*b"ompo"),
+					u32::from_ne_bytes(*b"sito"),
+					u32::from_ne_bytes(*b"r\0\0\0"),
+					5, // version: uint
+				])
+				.unwrap();
+				send.submit(&wire_event![
+					id=reg_id, op=0;
+					1, // name: uint
+					7, // interface: string (len)
+					u32::from_ne_bytes(*b"wl_s"),
+					u32::from_ne_bytes(*b"hm\0\0"),
+					1, // version: uint
+				])
+				.unwrap();
+				send.submit(&wire_event![
+					id=reg_id, op=0;
+					2, // name: uint
+					23, // interface: string (len)
+					u32::from_ne_bytes(*b"wl_d"),
+					u32::from_ne_bytes(*b"ata_"),
+					u32::from_ne_bytes(*b"devi"),
+					u32::from_ne_bytes(*b"ce_m"),
+					u32::from_ne_bytes(*b"anag"),
+					u32::from_ne_bytes(*b"er\0\0"),
+					3, // version: uint
+				])
+				.unwrap();
 			},
 			_ => (),
 		};
 	}
 	trace!("flushing buffers");
-	match client.poll_flush() {
+	match send.poll_flush() {
 		Poll::Ready(Ok(())) => (),
 		Poll::Ready(Err(err)) => {
 			warn!("client {key} errored, dropping connection: {err:?}");

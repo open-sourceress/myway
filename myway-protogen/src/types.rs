@@ -38,7 +38,8 @@ pub struct Arg<'doc> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ArgType<'doc> {
 	Int,
-	Uint { r#enum: Option<&'doc str> },
+	Uint,
+	Enum(&'doc str),
 	Fixed,
 	String { nullable: bool },
 	Object { interface: Option<&'doc str>, nullable: bool },
