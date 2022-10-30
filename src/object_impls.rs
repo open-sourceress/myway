@@ -1,7 +1,7 @@
 use crate::{
 	client::SendHalf,
 	objects::VacantEntry,
-	protocol::{wl_callback::WlCallback, wl_display::WlDisplay, wl_registry::WlRegistry, Object},
+	protocol::{wl_callback::WlCallback, wl_display::WlDisplay, wl_registry::WlRegistry, Id, Object},
 };
 use log::info;
 use std::io::Result;
@@ -12,40 +12,14 @@ pub struct Display;
 impl WlDisplay for Display {
 	fn handle_sync(&mut self, client: &mut SendHalf<'_>, callback: VacantEntry<'_, Callback>) -> Result<()> {
 		info!("wl_display.sync(callback={:?})", callback.id());
-		client.submit(callback.id().into(), 0, &[/* seq: TODO fill this actually */ 0])
+		let id = callback.id();
+		callback.insert(Callback).take().send_done(id, client, 0)
 	}
 
 	fn handle_get_registry(&mut self, client: &mut SendHalf<'_>, registry: VacantEntry<'_, Registry>) -> Result<()> {
 		info!("wl_display.get_registry(registry={:?})", registry.id());
 		let registry = registry.insert(Registry);
-		client.submit(registry.id().into(), /* global */ 0, &[
-			0,  // name: uint
-			14, // interface: string (len)
-			u32::from_ne_bytes(*b"wl_c"),
-			u32::from_ne_bytes(*b"ompo"),
-			u32::from_ne_bytes(*b"sito"),
-			u32::from_ne_bytes(*b"r\0\0\0"),
-			5, // version: uint
-		])?;
-		client.submit(registry.id().into(), 0, &[
-			1,
-			7,
-			u32::from_ne_bytes(*b"wl_s"),
-			u32::from_ne_bytes(*b"hm\0\0"),
-			1,
-		])?;
-		client.submit(registry.id().into(), 0, &[
-			2,  // name: uint
-			23, // interface: string (len)
-			u32::from_ne_bytes(*b"wl_d"),
-			u32::from_ne_bytes(*b"ata_"),
-			u32::from_ne_bytes(*b"devi"),
-			u32::from_ne_bytes(*b"ce_m"),
-			u32::from_ne_bytes(*b"anag"),
-			u32::from_ne_bytes(*b"er\0\0"),
-			3, // version: uint
-		])?;
-		Ok(())
+		registry.send_globals(registry.id(), client)
 	}
 }
 
@@ -56,6 +30,15 @@ impl WlCallback for Callback {}
 
 #[derive(Debug)]
 pub struct Registry;
+
+impl Registry {
+	fn send_globals(&self, self_id: Id<Self>, client: &mut SendHalf<'_>) -> Result<()> {
+		self.send_global(self_id, client, 0, "wl_compositor", 5)?;
+		self.send_global(self_id, client, 1, "wl_shm", 5)?;
+		self.send_global(self_id, client, 2, "wl_data_device_manager", 3)?;
+		Ok(())
+	}
+}
 
 impl WlRegistry for Registry {
 	fn handle_bind(

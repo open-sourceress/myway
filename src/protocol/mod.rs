@@ -1,11 +1,13 @@
 use std::os::unix::prelude::OwnedFd;
 
 mod args;
+mod event;
 mod fixed;
 mod id;
 
 pub use self::{
 	args::{Args, FromArgs},
+	event::{Event, ToEvent},
 	fixed::Fixed,
 	id::Id,
 };
@@ -18,3 +20,10 @@ pub const WORD_SIZE: usize = std::mem::size_of::<Word>();
 
 /// An owned file descriptor, passed over the socket for shared memory or bulk data transfer.
 pub type Fd = OwnedFd;
+
+#[allow(unused_imports, dead_code, clippy::enum_variant_names)]
+mod generated {
+	include!(concat!(env!("OUT_DIR"), "/wayland_protocol.rs"));
+}
+
+pub use generated::*;

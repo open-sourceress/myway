@@ -4,7 +4,7 @@ use self::{
 	epoll::{Epoll, Event, EPOLLIN, EPOLLOUT},
 	fds::{catch_sigint, Fd},
 };
-use crate::protocol_types::{Args, Id};
+use crate::protocol::{Args, Id};
 use clap::Parser;
 use log::{debug, info, trace, warn};
 use slab::Slab;
@@ -21,12 +21,7 @@ mod fds;
 mod logger;
 mod object_impls;
 mod objects;
-mod protocol_types;
-
-mod protocol {
-	#![allow(unused_imports, dead_code, clippy::enum_variant_names)]
-	include!(concat!(env!("OUT_DIR"), "/wayland_protocol.rs"));
-}
+mod protocol;
 
 /// Wayland compositor
 #[derive(Debug, Parser)]

@@ -1,4 +1,4 @@
-use super::{Args, FromArgs};
+use super::{Args, FromArgs, ToEvent};
 use std::{
 	cmp::Ordering,
 	fmt::{self, Debug, Display, Formatter},
@@ -90,5 +90,25 @@ impl<'a, T> FromArgs<'a> for Id<T> {
 impl<'a, T> FromArgs<'a> for Option<Id<T>> {
 	fn from_args(args: &mut Args<'a>) -> Result<Self> {
 		u32::from_args(args).map(Id::new)
+	}
+}
+
+impl<T> ToEvent for Id<T> {
+	fn encoded_len(&self) -> u16 {
+		1
+	}
+
+	fn encode(&self, event: &mut super::Event<'_>) {
+		event.write(self.0.get())
+	}
+}
+
+impl<T> ToEvent for Option<Id<T>> {
+	fn encoded_len(&self) -> u16 {
+		1
+	}
+
+	fn encode(&self, event: &mut super::Event<'_>) {
+		event.write(self.map_or(0, |id| id.0.get()))
 	}
 }

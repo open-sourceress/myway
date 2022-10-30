@@ -1,15 +1,17 @@
-use crate::types::{Arg, ArgType, Interface, Protocol};
+use crate::types::{Arg, ArgType, Enum, Interface, Protocol};
 use std::{
 	fmt::{self, Display, Formatter, Write as _},
 	io::{Result, Write},
 };
 
+/// Map of protocol interface types to their corresponding Rust implementation type.
 static IMPL_TYPES: &[(&str, &str)] = &[
 	("wl_display", "crate::object_impls::Display"),
 	("wl_callback", "crate::object_impls::Callback"),
 	("wl_registry", "crate::object_impls::Registry"),
 ];
 
+/// Find the Rust implementation type for a given protocol interface.
 fn impl_of<'a, 'b>(iface: &'b str) -> Option<&'a str> {
 	IMPL_TYPES.iter().find(|&&(ifa, _)| ifa == iface).map(|&(_, ty)| ty)
 }
@@ -19,7 +21,7 @@ pub(crate) fn emit_protocol(protocol: &Protocol<'_>, dest: &mut impl Write) -> R
 		writeln!(dest, "// Copyright of the protocol specification:")?;
 		write_multiline(dest, "// > ", [c])?;
 	}
-	writeln!(dest, "use crate::objects::{{ObjectType}};")?;
+	writeln!(dest, "use crate::objects::ObjectType;")?;
 	if let Some(desc) = protocol.desc {
 		write_multiline(dest, "//! ", [desc.summary, desc.description])?;
 	}
@@ -62,11 +64,12 @@ fn emit_interface(dest: &mut impl Write, iface: &Interface, impl_type: Option<&s
 	writeln!(dest, "pub mod {} {{", iface.name)?;
 	writeln!(dest, "\tuse crate::client::SendHalf;")?;
 	writeln!(dest, "\tuse crate::objects::{{Objects, OccupiedEntry, VacantEntry}};")?;
-	writeln!(dest, "\tuse crate::protocol_types::{{Args, Fixed, FromArgs, Id, Fd}};")?;
+	writeln!(dest, "\tuse crate::protocol::{{Args, Event, Fd, Fixed, FromArgs, Id, ToEvent}};")?;
 	writeln!(dest, "\tuse super::Object;")?;
 	writeln!(dest, "\tuse log::trace;")?;
 	writeln!(dest, "\tuse std::io::{{self, ErrorKind, Result}};")?;
 	writeln!(dest, "\t#[allow(clippy::too_many_arguments)]")?;
+
 	writeln!(dest, "\tpub trait {trait_name}: Sized {{")?;
 	for req in &iface.requests {
 		if let Some(desc) = req.desc {
@@ -86,103 +89,164 @@ fn emit_interface(dest: &mut impl Write, iface: &Interface, impl_type: Option<&s
 		}
 		write!(dest, "client: &mut SendHalf<'_>, ")?;
 		for arg in &req.args {
-			write!(dest, "{}: {}, ", arg.name, RustArgType(arg.ty))?;
+			write!(dest, "{}: {}, ", arg.name, RustArgType(arg.ty, TypePosition::Handler))?;
 		}
 		writeln!(dest, ") -> Result<()>;")?;
 	}
 	writeln!(dest, "\t}}")?;
+
 	if let Some(impl_type) = impl_type {
 		writeln!(dest, "\timpl {impl_type} where Self: {trait_name} {{")?;
-		writeln!(dest, "\t\t#[allow(unused_mut, clippy::match_single_binding)]")?;
-		writeln!(
-			dest,
-			"\t\tpub fn handle_request(objects: &mut Objects, client: &mut SendHalf<'_>, this_id: Id<Object>, opcode: \
-			 u16, mut args: Args<'_>) -> Result<()> {{"
-		)?;
-		writeln!(dest, "\t\t\tmatch opcode {{")?;
-		for (i, req) in iface.requests.iter().enumerate() {
-			writeln!(dest, "\t\t\t\t{i} => {{")?;
-			for arg in &req.args {
+		emit_request_handler(dest, iface)?;
+		for (opcode, ev) in iface.events.iter().enumerate() {
+			write!(dest, "\t\tpub fn send_{}(", ev.name)?;
+			if ev.kind == Some("destructor") {
+				write!(dest, "self")?;
+			} else {
+				write!(dest, "&self")?;
+			}
+			write!(dest, ", self_id: Id<Self>, client: &mut SendHalf<'_>")?;
+			for arg in &ev.args {
+				write!(dest, ", {}: {}", arg.name, RustArgType(arg.ty, TypePosition::Event))?;
+			}
+			writeln!(dest, ") -> Result<()> {{")?;
+			writeln!(dest, "\t\t\t#[allow(clippy::identity_op)]")?;
+			write!(dest, "\t\t\tlet len = 0")?;
+			for arg in &ev.args {
+				write!(dest, " + {}.encoded_len()", arg.name)?;
+			}
+			writeln!(dest, ";")?;
+			writeln!(dest, "\t\t\tclient.submit(self_id.into(), {opcode}, len as usize, |space| {{")?;
+			writeln!(dest, "\t\t\t\tlet mut event = Event::new(space);")?;
+			for arg in &ev.args {
 				writeln!(
 					dest,
-					"\t\t\t\t\ttrace!(\"parsing argument {}: {1} as {1:#} from {{args:?}}\");",
+					"\t\t\t\ttrace!(\"encoding argument {0}={{{0}:?}} (type: {1}) for event\");",
 					arg.name,
-					RustArgType(arg.ty)
+					RustArgType(arg.ty, TypePosition::Event)
 				)?;
-				writeln!(dest, "\t\t\t\t\tlet {} = <{:#}>::from_args(&mut args)?;", arg.name, RustArgType(arg.ty))?;
+				writeln!(dest, "\t\t\t\t{}.encode(&mut event);", arg.name)?;
 			}
-			writeln!(dest, "\t\t\t\t\targs.finish()?;")?;
-			writeln!(
-				dest,
-				"\t\t\t\t\tlet [this{args}] = objects.get_many_mut([this_id{args}])?;",
-				args = IdArgs(&req.args)
-			)?;
-			writeln!(dest, "\t\t\t\t\tlet mut this = this.into_occupied()?.downcast::<Self>()?;")?;
-			for arg in &req.args {
-				match arg.ty {
-					ArgType::Object { .. } => {
-						writeln!(dest, "\t\t\t\t\tlet {name} = {name}.into_occupied()?.downcast()?;", name = arg.name)?
-					},
-					ArgType::NewId { .. } => {
-						writeln!(dest, "\t\t\t\t\tlet {name} = {name}.into_vacant()?.downcast();", name = arg.name)?
-					},
-					_ => (),
-				}
-			}
-			if req.kind == Some("destructor") {
-				write!(dest, "\t\t\t\t\tthis.take().handle_{}(client, ", req.name)?;
-			} else {
-				write!(dest, "\t\t\t\t\tthis.handle_{}(client, ", req.name)?;
-			}
-			for arg in &req.args {
-				write!(dest, "{}, ", arg.name)?;
-			}
-			writeln!(dest, ")")?;
-			writeln!(dest, "\t\t\t\t}},")?;
+			writeln!(dest, "\t\t\t\tevent.finish();")?;
+			writeln!(dest, "\t\t\t}})")?;
+			writeln!(dest, "\t\t}}")?;
 		}
-		// ignore unused_variables for arguments without suppressing the lint for the entire function
-		writeln!(
-			dest,
-			"\t\t\t\t_ => {{ let _ = (objects, client, this_id, args); Err(ErrorKind::InvalidInput.into()) }},"
-		)?;
-		writeln!(dest, "\t\t\t}}")?;
-		writeln!(dest, "\t\t}}")?;
 		writeln!(dest, "\t}}")?;
 	}
 
 	for en in &iface.enums {
-		let name = RustName(en.name);
-		if let Some(desc) = en.desc {
-			write_multiline(dest, "\t/// ", [desc.summary, desc.description])?;
-		}
-		writeln!(dest, "\t#[repr(u32)]")?;
-		writeln!(dest, "\t#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]")?;
-		writeln!(dest, "\tpub enum {name} {{")?;
-		for ent in &en.entries {
-			if let Some(doc) = ent.summary {
-				writeln!(dest, "\t\t/// {doc}")?;
-			}
-			write!(dest, "\t\t{} = ", RustName(ent.name))?;
-			if ent.value_is_hex {
-				writeln!(dest, "{:#x},", ent.value)?;
-			} else {
-				writeln!(dest, "{},", ent.value)?;
-			}
-		}
-		writeln!(dest, "\t}}")?;
-		writeln!(dest, "\timpl<'a> FromArgs<'a> for {name} {{")?;
-		writeln!(dest, "\t\tfn from_args(args: &mut Args<'a>) -> Result<Self> {{")?;
-		writeln!(dest, "\t\t\tmatch u32::from_args(args)? {{")?;
-		for ent in &en.entries {
-			writeln!(dest, "\t\t\t\t{} => Ok(Self::{}),", ent.value, RustName(ent.name))?;
-		}
-		writeln!(dest, "\t\t\t\t_ => Err(io::Error::new(ErrorKind::InvalidInput, \"invalid {name}\")),")?;
-		writeln!(dest, "\t\t\t}}")?; // match
-		writeln!(dest, "\t\t}}")?; // fn
-		writeln!(dest, "\t}}")?; // trait impl
+		emit_enum(dest, en)?;
 	}
 
 	writeln!(dest, "}}")?;
+	Ok(())
+}
+
+/// Emit  `fn handle_request(..) -> Result<()>` for an interface implementation.
+/// The function dispatches requests to the appropriate method by opcode.
+fn emit_request_handler(dest: &mut impl Write, iface: &Interface<'_>) -> Result<()> {
+	writeln!(dest, "\t\t#[allow(unused_mut, clippy::match_single_binding)]")?; // for interfaces with no requests
+	writeln!(
+		dest,
+		"\t\tpub fn handle_request(objects: &mut Objects, this_id: Id<Object>, client: &mut SendHalf<'_>, opcode: \
+		 u16, mut args: Args<'_>) -> Result<()> {{"
+	)?;
+	writeln!(dest, "\t\t\tmatch opcode {{")?;
+	for (i, req) in iface.requests.iter().enumerate() {
+		writeln!(dest, "\t\t\t\t{i} => {{")?;
+		for arg in &req.args {
+			writeln!(
+				dest,
+				"\t\t\t\t\ttrace!(\"decoding argument {} (type: {}) from {{args:?}}\");",
+				arg.name,
+				RustArgType(arg.ty, TypePosition::Handler),
+			)?;
+			writeln!(
+				dest,
+				"\t\t\t\t\tlet {} = <{:#}>::from_args(&mut args)?;",
+				arg.name,
+				RustArgType(arg.ty, TypePosition::RawProtocol),
+			)?;
+		}
+		writeln!(dest, "\t\t\t\t\targs.finish()?;")?;
+		writeln!(
+			dest,
+			"\t\t\t\t\tlet [this{args}] = objects.get_many_mut([this_id{args}])?;",
+			args = IdArgs(&req.args)
+		)?;
+		writeln!(dest, "\t\t\t\t\tlet mut this = this.into_occupied()?.downcast::<Self>()?;")?;
+		for arg in &req.args {
+			match arg.ty {
+				ArgType::Object { .. } => {
+					writeln!(dest, "\t\t\t\t\tlet {name} = {name}.into_occupied()?.downcast()?;", name = arg.name)?
+				},
+				ArgType::NewId { .. } => {
+					writeln!(dest, "\t\t\t\t\tlet {name} = {name}.into_vacant()?.downcast();", name = arg.name)?
+				},
+				_ => (),
+			}
+		}
+		if req.kind == Some("destructor") {
+			write!(dest, "\t\t\t\t\tthis.take().handle_{}(client, ", req.name)?;
+		} else {
+			write!(dest, "\t\t\t\t\tthis.handle_{}(client, ", req.name)?;
+		}
+		for arg in &req.args {
+			write!(dest, "{}, ", arg.name)?;
+		}
+		writeln!(dest, ")")?;
+		writeln!(dest, "\t\t\t\t}},")?;
+	}
+	writeln!(dest, "\t\t\t\t_ => {{")?;
+	// ignore unused_variables for arguments without suppressing the lint for the entire function
+	writeln!(dest, "\t\t\t\t\tlet _ = (objects, client, this_id, args);")?;
+	writeln!(dest, "\t\t\t\t\tErr(io::Error::new(ErrorKind::InvalidInput, \"unknown request opcode {{opcode}}\"))")?;
+	writeln!(dest, "\t\t\t\t}},")?; // match arm
+	writeln!(dest, "\t\t\t}}")?; // match body
+	writeln!(dest, "\t\t}}")?; // method body
+	Ok(())
+}
+
+fn emit_enum(dest: &mut impl Write, en: &Enum) -> Result<()> {
+	let name = RustName(en.name);
+	if let Some(desc) = en.desc {
+		write_multiline(dest, "\t/// ", [desc.summary, desc.description])?;
+	}
+	writeln!(dest, "\t#[repr(u32)]")?;
+	writeln!(dest, "\t#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]")?;
+	writeln!(dest, "\tpub enum {name} {{")?;
+	for ent in &en.entries {
+		if let Some(doc) = ent.summary {
+			writeln!(dest, "\t\t/// {doc}")?;
+		}
+		write!(dest, "\t\t{} = ", RustName(ent.name))?;
+		if ent.value_is_hex {
+			writeln!(dest, "{:#x},", ent.value)?;
+		} else {
+			writeln!(dest, "{},", ent.value)?;
+		}
+	}
+	writeln!(dest, "\t}}")?;
+
+	writeln!(dest, "\timpl<'a> FromArgs<'a> for {name} {{")?;
+	writeln!(dest, "\t\tfn from_args(args: &mut Args<'a>) -> Result<Self> {{")?;
+	writeln!(dest, "\t\t\tmatch u32::from_args(args)? {{")?;
+	for ent in &en.entries {
+		writeln!(dest, "\t\t\t\t{} => Ok(Self::{}),", ent.value, RustName(ent.name))?;
+	}
+	writeln!(dest, "\t\t\t\t_ => Err(io::Error::new(ErrorKind::InvalidInput, \"invalid {name}\")),")?;
+	writeln!(dest, "\t\t\t}}")?; // match
+	writeln!(dest, "\t\t}}")?; // fn
+	writeln!(dest, "\t}}")?; // trait impl
+
+	writeln!(dest, "\timpl ToEvent for {name} {{")?;
+	writeln!(dest, "\t\tfn encoded_len(&self) -> u16 {{")?;
+	writeln!(dest, "\t\t\t1")?;
+	writeln!(dest, "\t\t}}")?;
+	writeln!(dest, "\t\tfn encode(&self, event: &mut Event<'_>) {{")?;
+	writeln!(dest, "\t\t\t(*self as u32).encode(event);")?;
+	writeln!(dest, "\t\t}}")?;
+	writeln!(dest, "\t}}")?;
 	Ok(())
 }
 
@@ -241,26 +305,43 @@ impl Display for RustName<'_> {
 /// With the alternate flag (`{arg_type:#}`), format as the type that implements `FromArgs` for parsing an argument from
 /// a message.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct RustArgType<'a>(ArgType<'a>);
+struct RustArgType<'a>(ArgType<'a>, TypePosition);
 
 impl RustArgType<'_> {
-	fn emit_object(new_id: bool, iface: Option<&str>, nullable: bool, f: &mut Formatter<'_>) -> fmt::Result {
+	fn emit_object(&self, new_id: bool, iface: Option<&str>, nullable: bool, f: &mut Formatter<'_>) -> fmt::Result {
 		if nullable {
 			f.write_str("Option<")?;
 		}
-		if f.alternate() {
-			// emit as FromArgs type
-			f.write_str("Id<Object>")?;
-		} else {
-			let entry_type = if new_id { "Vacant" } else { "Occupied" };
-			let iface = iface.and_then(impl_of).unwrap_or("Object");
-			write!(f, "{entry_type}Entry<'_, {iface}>")?;
+		match self.1 {
+			TypePosition::Handler => {
+				let entry_type = if new_id { "Vacant" } else { "Occupied" };
+				let iface = iface.and_then(impl_of).unwrap_or("Object");
+				write!(f, "{entry_type}Entry<'_, {iface}>")?;
+			},
+			TypePosition::Event => {
+				let iface = iface.and_then(impl_of).unwrap_or("Object");
+				write!(f, "Id<{iface}>")?;
+			},
+			TypePosition::RawProtocol => {
+				f.write_str("Id<Object>")?;
+			},
 		}
 		if nullable {
 			f.write_str(">")?;
 		}
 		Ok(())
 	}
+}
+
+/// Position in which a [`RustArgType`] is being emitted.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum TypePosition {
+	/// As an argument type in a request handler: strongest typing, passed by-value.
+	Handler,
+	/// As an argument type in an event sender: strongest typing, passed by-reference.
+	Event,
+	/// As a type that implements `FromArgs` for argument parsing.
+	RawProtocol,
 }
 
 impl Display for RustArgType<'_> {
@@ -272,8 +353,8 @@ impl Display for RustArgType<'_> {
 			ArgType::Fixed => f.write_str("Fixed"),
 			ArgType::String { nullable: false } => f.write_str("&str"),
 			ArgType::String { nullable: true } => f.write_str("Option<&str>"),
-			ArgType::Object { interface, nullable } => Self::emit_object(false, interface, nullable, f),
-			ArgType::NewId { interface } => Self::emit_object(true, interface, false, f),
+			ArgType::Object { interface, nullable } => self.emit_object(false, interface, nullable, f),
+			ArgType::NewId { interface } => self.emit_object(true, interface, false, f),
 			ArgType::Array => f.write_str("&[Word]"),
 			ArgType::Fd => f.write_str("Fd"),
 		}

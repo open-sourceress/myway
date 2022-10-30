@@ -1,7 +1,6 @@
 use crate::{
 	client, object_impls,
-	protocol::Object,
-	protocol_types::{Args, Id},
+	protocol::{Args, Id, Object},
 };
 use std::{
 	fmt::{self},
@@ -95,7 +94,7 @@ impl Objects {
 			Some(Some(Object::Registry(_))) => object_impls::Registry::handle_request,
 			None | Some(None) => return Ok(()),
 		};
-		handler(self, client, id, opcode, args)
+		handler(self, id, client, opcode, args)
 	}
 }
 

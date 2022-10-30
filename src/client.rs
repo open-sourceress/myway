@@ -1,4 +1,4 @@
-use crate::{cvt_poll, object_impls::Display, objects::Objects, protocol_types::Id};
+use crate::{cvt_poll, object_impls::Display, objects::Objects, protocol::Id};
 use log::trace;
 use std::{
 	fmt,
@@ -73,8 +73,14 @@ impl<'c> SendHalf<'c> {
 	/// This method appends the message content to an internal buffer, flushing bytes from that buffer to the client
 	/// only if necessary to fit the provided message. To ensure messages are delivered in a timely manner, call
 	/// [`poll_flush`](Self::poll_flush) after this method.
-	pub fn submit(&mut self, object_id: u32, opcode: u16, args: &[Word]) -> Result<()> {
-		let byte_len = (2 + args.len()) * WORD_SIZE;
+	pub fn submit(
+		&mut self,
+		object_id: u32,
+		opcode: u16,
+		args_len: usize,
+		args: impl FnOnce(&mut [Word]),
+	) -> Result<()> {
+		let byte_len = (2 + args_len) * WORD_SIZE;
 		trace!("submitting message of {byte_len} bytes");
 		assert!(byte_len <= CAP_BYTES, "cannot write {byte_len} bytes into a buffer of {CAP_BYTES} bytes");
 
@@ -106,7 +112,7 @@ impl<'c> SendHalf<'c> {
 		let start = div_exact(buf.write_idx, "write_idx");
 		buf.buf[start] = object_id;
 		buf.buf[start + 1] = ((byte_len as u32) << 16) | opcode as u32;
-		buf.buf[start + 2..start + 2 + args.len()].copy_from_slice(args);
+		args(&mut buf.buf[start + 2..start + 2 + args_len]);
 		trace!("wrote message to buffer, bytes {}..{}", start * WORD_SIZE, start * WORD_SIZE + byte_len);
 		buf.write_idx += byte_len;
 		Ok(())
