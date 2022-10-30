@@ -1,4 +1,4 @@
-use crate::{cvt_poll, object_impls::Display};
+use crate::{cvt_poll, object_impls::Display, objects::Objects, protocol_types::Id};
 use log::trace;
 use std::{
 	fmt,
@@ -38,19 +38,22 @@ pub struct Client {
 	tx: Buffer,
 	/// Buffered messages to be processed
 	rx: Buffer,
-	display: Option<Display>,
+	/// Objects allocated to this client
+	objects: Objects,
 }
 
 impl Client {
 	pub fn new(sock: UnixStream) -> Self {
-		Self { sock, tx: Buffer::new(), rx: Buffer::new(), display: Some(Display) }
+		let mut objects = Objects::new();
+		objects.insert(Id::<Display>::new(1).unwrap(), Display).unwrap();
+		Self { sock, tx: Buffer::new(), rx: Buffer::new(), objects }
 	}
 
-	pub fn split_mut(&mut self) -> (SendHalf<'_>, RecvHalf<'_>, &mut Option<Display>) {
+	pub fn split_mut(&mut self) -> (SendHalf<'_>, RecvHalf<'_>, &mut Objects) {
 		(
 			SendHalf { sock: &self.sock, buf: &mut self.tx },
 			RecvHalf { sock: &self.sock, buf: &mut self.rx },
-			&mut self.display,
+			&mut self.objects,
 		)
 	}
 }
@@ -70,8 +73,8 @@ impl<'c> SendHalf<'c> {
 	/// This method appends the message content to an internal buffer, flushing bytes from that buffer to the client
 	/// only if necessary to fit the provided message. To ensure messages are delivered in a timely manner, call
 	/// [`poll_flush`](Self::poll_flush) after this method.
-	pub fn submit(&mut self, message: &[Word]) -> Result<()> {
-		let byte_len = message.len() * WORD_SIZE;
+	pub fn submit(&mut self, object_id: u32, opcode: u16, args: &[Word]) -> Result<()> {
+		let byte_len = (2 + args.len()) * WORD_SIZE;
 		trace!("submitting message of {byte_len} bytes");
 		assert!(byte_len <= CAP_BYTES, "cannot write {byte_len} bytes into a buffer of {CAP_BYTES} bytes");
 
@@ -101,8 +104,10 @@ impl<'c> SendHalf<'c> {
 		}
 		let buf = &mut self.buf;
 		let start = div_exact(buf.write_idx, "write_idx");
-		buf.buf[start..start + message.len()].copy_from_slice(message);
-		trace!("wrote message to buffer, bytes {}..{}", start * WORD_SIZE, (start + message.len()) * WORD_SIZE);
+		buf.buf[start] = object_id;
+		buf.buf[start + 1] = ((byte_len as u32) << 16) | opcode as u32;
+		buf.buf[start + 2..start + 2 + args.len()].copy_from_slice(args);
+		trace!("wrote message to buffer, bytes {}..{}", start * WORD_SIZE, start * WORD_SIZE + byte_len);
 		buf.write_idx += byte_len;
 		Ok(())
 	}

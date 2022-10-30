@@ -117,7 +117,7 @@ fn build_message<'doc>(node: Node<'doc, '_>) -> Result<Message<'doc>> {
 			});
 			args.push(Arg {
 				name: "version",
-				ty: ArgType::String { nullable: false },
+				ty: ArgType::Uint,
 				summary: Some("version of the requested interface to bind as"),
 			});
 		}

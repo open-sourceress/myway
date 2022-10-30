@@ -4,6 +4,7 @@ use self::{
 	epoll::{Epoll, Event, EPOLLIN, EPOLLOUT},
 	fds::{catch_sigint, Fd},
 };
+use crate::protocol_types::{Args, Id};
 use clap::Parser;
 use log::{debug, info, trace, warn};
 use slab::Slab;
@@ -19,11 +20,17 @@ mod epoll;
 mod fds;
 mod logger;
 mod object_impls;
-mod protocol;
+mod objects;
+mod protocol_types;
+
+mod protocol {
+	#![allow(unused_imports, dead_code, clippy::enum_variant_names)]
+	include!(concat!(env!("OUT_DIR"), "/wayland_protocol.rs"));
+}
 
 /// Wayland compositor
 #[derive(Debug, Parser)]
-struct Args {
+struct CliArgs {
 	/// Unix socket listener to bind on (default: $XDG_RUNTIME_DIR/wayland-0)
 	#[clap(long)]
 	socket_path: Option<PathBuf>,
@@ -36,7 +43,7 @@ const SIGNAL_KEY: u64 = u64::MAX - 1;
 
 fn main() -> io::Result<()> {
 	logger::init();
-	let Args { socket_path } = Args::parse();
+	let CliArgs { socket_path } = CliArgs::parse();
 	let socket_path = match socket_path {
 		Some(path) => path,
 		None => {
@@ -61,7 +68,6 @@ fn main() -> io::Result<()> {
 	let mut clients = Slab::new();
 
 	let mut events = [Event::empty(); 32];
-	let mut event_serial = 0;
 	'run: loop {
 		for event in epoll.wait_for_activity(&mut events, None)? {
 			match event.data() {
@@ -72,11 +78,11 @@ fn main() -> io::Result<()> {
 						epoll.register(&sock, EPOLLIN | EPOLLOUT, key as u64)?;
 						trace!("registered socket with epoll (client key {key})");
 						entry.insert(Client::new(sock));
-						poll_client(&mut clients, &mut event_serial, key); // immediately poll until pending
+						poll_client(&mut clients, key); // immediately poll until pending
 					}
 				},
 				SIGNAL_KEY => break 'run,
-				key => poll_client(&mut clients, &mut event_serial, key as usize),
+				key => poll_client(&mut clients, key as usize),
 			}
 		}
 	}
@@ -85,18 +91,7 @@ fn main() -> io::Result<()> {
 	Ok(())
 }
 
-macro_rules! wire_event {
-	(id = $id:expr, op = $op:expr) => { wire_event![id=$id, op=$op;]};
-	(id = $id:expr, op = $op:expr; $($arg:expr),* $(,)?) => {
-		{
-			let mut words = [$id, $op, $($arg,)*];
-			words[1] |= (words.len() as u32) << 18;
-			words
-		}
-	}
-}
-
-fn poll_client(clients: &mut Slab<Client>, event_serial: &mut u32, key: usize) {
+fn poll_client(clients: &mut Slab<Client>, key: usize) {
 	let client = match clients.get_mut(key) {
 		Some(c) => c,
 		None => {
@@ -104,7 +99,7 @@ fn poll_client(clients: &mut Slab<Client>, event_serial: &mut u32, key: usize) {
 			return;
 		},
 	};
-	let (mut send, mut recv, obj) = client.split_mut();
+	let (mut send, mut recv, objects) = client.split_mut();
 	loop {
 		let (oid, op, args) = match recv.poll_recv() {
 			Poll::Ready(Ok(req)) => req,
@@ -115,57 +110,15 @@ fn poll_client(clients: &mut Slab<Client>, event_serial: &mut u32, key: usize) {
 			},
 			Poll::Pending => break,
 		};
-		info!("message for {oid}! opcode={op}, args={args:?}");
-		if oid == 1 {
-			crate::protocol::wayland::wl_display::WlDisplayRequests::handle_request(obj, op, args).unwrap();
+		let id = Id::new(oid).unwrap();
+		match objects.dispatch_request(&mut send, id, op, Args::new(args)) {
+			Ok(()) => (),
+			Err(err) => {
+				warn!("client {key} errored, dropping connection: {err:?}");
+				clients.remove(key);
+				return;
+			},
 		}
-		match (oid, op, args) {
-			(1, 0, &[cb_id]) => {
-				info!("wl_display::sync(callback={cb_id})");
-				let serial = *event_serial;
-				*event_serial += 1;
-				send.submit(&wire_event![id=cb_id, op=0; serial]).unwrap();
-			},
-			(1, 1, &[reg_id]) => {
-				info!("wl_display::get_registry(registry={reg_id})");
-				// issue registry::global (op 0) events for some made-up globals
-				// args: name:uint, interface:string, version:uint
-				send.submit(&wire_event![
-					id=reg_id, op=0;
-					0, // name: uint
-					14, // interface: string (len)
-					u32::from_ne_bytes(*b"wl_c"),
-					u32::from_ne_bytes(*b"ompo"),
-					u32::from_ne_bytes(*b"sito"),
-					u32::from_ne_bytes(*b"r\0\0\0"),
-					5, // version: uint
-				])
-				.unwrap();
-				send.submit(&wire_event![
-					id=reg_id, op=0;
-					1, // name: uint
-					7, // interface: string (len)
-					u32::from_ne_bytes(*b"wl_s"),
-					u32::from_ne_bytes(*b"hm\0\0"),
-					1, // version: uint
-				])
-				.unwrap();
-				send.submit(&wire_event![
-					id=reg_id, op=0;
-					2, // name: uint
-					23, // interface: string (len)
-					u32::from_ne_bytes(*b"wl_d"),
-					u32::from_ne_bytes(*b"ata_"),
-					u32::from_ne_bytes(*b"devi"),
-					u32::from_ne_bytes(*b"ce_m"),
-					u32::from_ne_bytes(*b"anag"),
-					u32::from_ne_bytes(*b"er\0\0"),
-					3, // version: uint
-				])
-				.unwrap();
-			},
-			_ => (),
-		};
 	}
 	trace!("flushing buffers");
 	match send.poll_flush() {
