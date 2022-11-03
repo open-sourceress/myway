@@ -5,12 +5,7 @@ mod event;
 mod fixed;
 mod id;
 
-pub use self::{
-	args::{Args, FromArgs},
-	event::{Event, ToEvent},
-	fixed::Fixed,
-	id::Id,
-};
+pub use self::{args::DecodeArg, event::EncodeArg, fixed::Fixed, id::Id};
 
 /// A single protocol word. Messages are always a multiple of this size.
 pub type Word = u32;

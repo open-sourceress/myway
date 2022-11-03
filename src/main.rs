@@ -4,7 +4,6 @@ use self::{
 	epoll::{Epoll, Event, EPOLLIN, EPOLLOUT},
 	fds::{catch_sigint, Fd},
 };
-use crate::protocol::{Args, Id};
 use clap::Parser;
 use log::{debug, info, trace, warn};
 use slab::Slab;
@@ -20,7 +19,7 @@ mod epoll;
 mod fds;
 mod logger;
 mod object_impls;
-mod objects;
+mod object_map;
 mod protocol;
 
 /// Wayland compositor
@@ -96,7 +95,7 @@ fn poll_client(clients: &mut Slab<Client>, key: usize) {
 	};
 	let (mut send, mut recv, objects) = client.split_mut();
 	loop {
-		let (oid, op, args) = match recv.poll_recv() {
+		let msg = match recv.poll_recv() {
 			Poll::Ready(Ok(req)) => req,
 			Poll::Ready(Err(err)) => {
 				warn!("client {key} errored, dropping connection: {err:?}");
@@ -105,8 +104,7 @@ fn poll_client(clients: &mut Slab<Client>, key: usize) {
 			},
 			Poll::Pending => break,
 		};
-		let id = Id::new(oid).unwrap();
-		match objects.dispatch_request(&mut send, id, op, Args::new(args)) {
+		match objects.dispatch_request(&mut send, msg) {
 			Ok(()) => (),
 			Err(err) => {
 				warn!("client {key} errored, dropping connection: {err:?}");

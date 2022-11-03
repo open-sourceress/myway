@@ -1,4 +1,6 @@
-use super::{Args, FromArgs, ToEvent};
+use crate::client::{RecvMessage, SendMessage};
+
+use super::{DecodeArg, EncodeArg};
 use std::{
 	cmp::Ordering,
 	fmt::{self, Debug, Display, Formatter},
@@ -78,37 +80,37 @@ impl<T> From<Id<T>> for u32 {
 	}
 }
 
-impl<'a, T> FromArgs<'a> for Id<T> {
-	fn from_args(args: &mut Args<'a>) -> Result<Self> {
-		match <Option<Self>>::from_args(args)? {
+impl<'a, T> DecodeArg<'a> for Id<T> {
+	fn decode_arg(message: &mut RecvMessage<'a>) -> Result<Self> {
+		match <Option<Self>>::decode_arg(message)? {
 			Some(arg) => Ok(arg),
 			None => Err(Error::new(ErrorKind::InvalidInput, "ID may not be null")),
 		}
 	}
 }
 
-impl<'a, T> FromArgs<'a> for Option<Id<T>> {
-	fn from_args(args: &mut Args<'a>) -> Result<Self> {
-		u32::from_args(args).map(Id::new)
+impl<'a, T> DecodeArg<'a> for Option<Id<T>> {
+	fn decode_arg(message: &mut RecvMessage<'a>) -> Result<Self> {
+		u32::decode_arg(message).map(Id::new)
 	}
 }
 
-impl<T> ToEvent for Id<T> {
+impl<T> EncodeArg for Id<T> {
 	fn encoded_len(&self) -> u16 {
 		1
 	}
 
-	fn encode(&self, event: &mut super::Event<'_>) {
+	fn encode(&self, event: &mut SendMessage<'_>) {
 		event.write(self.0.get())
 	}
 }
 
-impl<T> ToEvent for Option<Id<T>> {
+impl<T> EncodeArg for Option<Id<T>> {
 	fn encoded_len(&self) -> u16 {
 		1
 	}
 
-	fn encode(&self, event: &mut super::Event<'_>) {
+	fn encode(&self, event: &mut SendMessage<'_>) {
 		event.write(self.map_or(0, |id| id.0.get()))
 	}
 }

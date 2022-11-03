@@ -1,69 +1,43 @@
 use super::{Fd, Word, WORD_SIZE};
-use std::fmt;
+use crate::client::SendMessage;
 
-pub struct Event<'a> {
-	space: &'a mut [Word],
-}
-
-impl<'a> Event<'a> {
-	pub fn new(space: &'a mut [Word]) -> Self {
-		Self { space }
-	}
-
-	pub fn write(&mut self, arg: u32) {
-		let (word, rest) = std::mem::take(&mut self.space).split_first_mut().unwrap();
-		*word = arg;
-		self.space = rest;
-	}
-
-	pub fn write_all(&mut self, args: &[u32]) {
-		let (space, rest) = std::mem::take(&mut self.space).split_at_mut(args.len());
-		space.copy_from_slice(args);
-		self.space = rest;
-	}
-
-	pub fn finish(self) {
-		assert!(self.space.is_empty(), "event did not fill its buffer, {} words remaining", self.space.len());
-	}
-}
-
-impl fmt::Debug for Event<'_> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("Event").field("capacity", &self.space.len()).finish()
-	}
-}
-
-pub trait ToEvent {
+pub trait EncodeArg {
 	/// Length of the encoded form of this value, in words.
 	fn encoded_len(&self) -> u16;
+
+	/// Does this argument encode a file descriptor?
+	fn is_fd(&self) -> bool {
+		false
+	}
+
 	/// Encode into an event.
 	///
 	/// `event` is guaranteed to have at least `self.encoded_len()` words of space remaining. Implementors may panic
 	/// but not cause undefined behavior if this precondition is not upheld.
-	fn encode(&self, event: &mut Event<'_>);
+	fn encode(&self, event: &mut SendMessage<'_>);
 }
 
-impl ToEvent for u32 {
+impl EncodeArg for u32 {
 	fn encoded_len(&self) -> u16 {
 		1
 	}
 
-	fn encode(&self, event: &mut Event<'_>) {
+	fn encode(&self, event: &mut SendMessage<'_>) {
 		event.write(*self);
 	}
 }
 
-impl ToEvent for i32 {
+impl EncodeArg for i32 {
 	fn encoded_len(&self) -> u16 {
 		(*self as u32).encoded_len()
 	}
 
-	fn encode(&self, event: &mut Event<'_>) {
+	fn encode(&self, event: &mut SendMessage<'_>) {
 		(*self as u32).encode(event)
 	}
 }
 
-impl<'a> ToEvent for &'a str {
+impl<'a> EncodeArg for &'a str {
 	fn encoded_len(&self) -> u16 {
 		assert!(self.len() < u16::MAX as usize, "string is too large to serialize");
 		let byte_len = self.len() as u16 + 1; // nul terminator
@@ -71,7 +45,7 @@ impl<'a> ToEvent for &'a str {
 		word_len + 1 // length
 	}
 
-	fn encode(&self, event: &mut Event<'_>) {
+	fn encode(&self, event: &mut SendMessage<'_>) {
 		(self.len() as u32 + 1).encode(event);
 		let (ptr, len) = (self.as_ptr(), self.len());
 		let mut i = 0;
@@ -90,7 +64,7 @@ impl<'a> ToEvent for &'a str {
 	}
 }
 
-impl<'a> ToEvent for Option<&'a str> {
+impl<'a> EncodeArg for Option<&'a str> {
 	fn encoded_len(&self) -> u16 {
 		match self {
 			Some(s) => s.encoded_len(),
@@ -98,7 +72,7 @@ impl<'a> ToEvent for Option<&'a str> {
 		}
 	}
 
-	fn encode(&self, event: &mut Event<'_>) {
+	fn encode(&self, event: &mut SendMessage<'_>) {
 		match self {
 			Some(s) => s.encode(event),
 			None => event.write(0), // len (empty)
@@ -106,24 +80,28 @@ impl<'a> ToEvent for Option<&'a str> {
 	}
 }
 
-impl<'a> ToEvent for &'a [Word] {
+impl<'a> EncodeArg for &'a [Word] {
 	fn encoded_len(&self) -> u16 {
 		assert!(self.len() < u16::MAX as usize, "string is too large to serialize");
 		self.len() as u16 + 1
 	}
 
-	fn encode(&self, event: &mut Event<'_>) {
+	fn encode(&self, event: &mut SendMessage<'_>) {
 		(self.len() as u32).encode(event);
 		event.write_all(self);
 	}
 }
 
-impl ToEvent for Fd {
+impl EncodeArg for Fd {
 	fn encoded_len(&self) -> u16 {
 		0
 	}
 
-	fn encode(&self, _event: &mut Event<'_>) {
-		todo!("serialize file descriptors")
+	fn is_fd(&self) -> bool {
+		true
+	}
+
+	fn encode(&self, event: &mut SendMessage<'_>) {
+		event.write_fd(self);
 	}
 }

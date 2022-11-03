@@ -1,90 +1,49 @@
+use crate::client::RecvMessage;
+
 use super::{Fd, Word, WORD_SIZE};
 use log::trace;
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Debug)]
-pub struct Args<'a> {
-	words: &'a [Word],
+pub trait DecodeArg<'a>: Sized {
+	fn decode_arg(message: &mut RecvMessage<'a>) -> Result<Self>;
 }
 
-impl<'a> Args<'a> {
-	pub fn new(words: &'a [Word]) -> Self {
-		Self { words }
-	}
-
-	pub fn take(&mut self) -> Result<Word> {
-		match self.words {
-			&[x, ref rest @ ..] => {
-				self.words = rest;
-				Ok(x)
-			},
-			[] => Err(Error::new(ErrorKind::InvalidInput, "too few arguments")),
-		}
-	}
-
-	pub fn take_n(&mut self, n: usize) -> Result<&'a [Word]> {
-		if n <= self.words.len() {
-			let (arg, rest) = self.words.split_at(n);
-			self.words = rest;
-			Ok(arg)
-		} else {
-			Err(Error::new(ErrorKind::InvalidInput, "too few arguments"))
-		}
-	}
-
-	pub fn take_fd(&mut self) -> Result<Fd> {
-		todo!("file descriptors")
-	}
-
-	pub fn finish(self) -> Result<()> {
-		if self.words.is_empty() {
-			Ok(())
-		} else {
-			Err(Error::new(ErrorKind::InvalidInput, "too many arguments"))
-		}
+impl<'a> DecodeArg<'a> for u32 {
+	fn decode_arg(message: &mut RecvMessage<'a>) -> Result<Self> {
+		message.take()
 	}
 }
 
-pub trait FromArgs<'a>: Sized {
-	fn from_args(args: &mut Args<'a>) -> Result<Self>;
-}
-
-impl<'a> FromArgs<'a> for u32 {
-	fn from_args(args: &mut Args<'a>) -> Result<Self> {
-		args.take()
+impl<'a> DecodeArg<'a> for i32 {
+	fn decode_arg(message: &mut RecvMessage<'a>) -> Result<Self> {
+		Ok(message.take()? as i32)
 	}
 }
 
-impl<'a> FromArgs<'a> for i32 {
-	fn from_args(args: &mut Args<'a>) -> Result<Self> {
-		Ok(args.take()? as i32)
-	}
-}
-
-impl<'a> FromArgs<'a> for &'a str {
-	fn from_args(args: &mut Args<'a>) -> Result<Self> {
-		let byte_len = u32::from_args(args)?;
+impl<'a> DecodeArg<'a> for &'a str {
+	fn decode_arg(message: &mut RecvMessage<'a>) -> Result<Self> {
+		let byte_len = u32::decode_arg(message)?;
 		match byte_len {
 			0 => Err(Error::new(ErrorKind::InvalidInput, "string argument must not be null")),
-			n => split_string_common(n, args),
+			n => split_string_common(n, message),
 		}
 	}
 }
 
-impl<'a> FromArgs<'a> for Option<&'a str> {
-	fn from_args(args: &mut Args<'a>) -> Result<Self> {
-		let byte_len = u32::from_args(args)?;
+impl<'a> DecodeArg<'a> for Option<&'a str> {
+	fn decode_arg(message: &mut RecvMessage<'a>) -> Result<Self> {
+		let byte_len = u32::decode_arg(message)?;
 		match byte_len {
 			0 => Ok(None),
-			n => split_string_common(n, args).map(Some),
+			n => split_string_common(n, message).map(Some),
 		}
 	}
 }
 
-fn split_string_common<'a>(byte_len: u32, args: &mut Args<'a>) -> Result<&'a str> {
+fn split_string_common<'a>(byte_len: u32, message: &mut RecvMessage<'a>) -> Result<&'a str> {
 	let word_len = (byte_len as usize + WORD_SIZE - 1) / WORD_SIZE; // divide by word size, rounded up
 	trace!("taking {word_len} words ({byte_len} bytes)");
-	let arg_words = args.take_n(word_len)?;
+	let arg_words = message.split(word_len)?;
 	// Safety: casting [Word; N] to equivalent [u8; N*WORD_SIZE]
 	// strings are transferred native-endian so the implicit to_ne_bytes is correct
 	let arg_bytes: &'a [u8] =
@@ -100,15 +59,15 @@ fn split_string_common<'a>(byte_len: u32, args: &mut Args<'a>) -> Result<&'a str
 	Ok(string)
 }
 
-impl<'a> FromArgs<'a> for &'a [Word] {
-	fn from_args(args: &mut Args<'a>) -> Result<Self> {
-		let word_len = u32::from_args(args)?;
-		args.take_n(word_len as usize)
+impl<'a> DecodeArg<'a> for &'a [Word] {
+	fn decode_arg(message: &mut RecvMessage<'a>) -> Result<Self> {
+		let word_len = u32::decode_arg(message)?;
+		message.split(word_len as usize)
 	}
 }
 
-impl<'a> FromArgs<'a> for Fd {
-	fn from_args(args: &mut Args<'a>) -> Result<Self> {
-		args.take_fd()
+impl<'a> DecodeArg<'a> for Fd {
+	fn decode_arg(message: &mut RecvMessage<'a>) -> Result<Self> {
+		message.take_fd()
 	}
 }

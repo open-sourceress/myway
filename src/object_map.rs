@@ -1,41 +1,42 @@
 use crate::{
-	client, object_impls,
-	protocol::{Args, Id, Object},
+	client::{self, RecvMessage},
+	protocol::{AnyObject, Id},
 };
 use std::{
-	fmt::{self},
+	fmt,
 	io::{Error, ErrorKind, Result},
 	mem::MaybeUninit,
 	ops::{Deref, DerefMut},
 };
 
-pub trait ObjectType: Sized {
-	fn upcast(self) -> Object;
-	fn downcast(object: Object) -> Option<Self>;
-	fn downcast_ref(object: &Object) -> Option<&Self>;
-	fn downcast_mut(object: &mut Object) -> Option<&mut Self>;
+/// Server-side representation and state backing a Wayland object.
+pub trait Object: Sized {
+	fn upcast(self) -> AnyObject;
+	fn downcast(object: AnyObject) -> Option<Self>;
+	fn downcast_ref(object: &AnyObject) -> Option<&Self>;
+	fn downcast_mut(object: &mut AnyObject) -> Option<&mut Self>;
 }
 
-impl ObjectType for Object {
-	fn upcast(self) -> Object {
+impl Object for AnyObject {
+	fn upcast(self) -> AnyObject {
 		self
 	}
 
-	fn downcast(object: Object) -> Option<Self> {
+	fn downcast(object: AnyObject) -> Option<Self> {
 		Some(object)
 	}
 
-	fn downcast_ref(object: &Object) -> Option<&Self> {
+	fn downcast_ref(object: &AnyObject) -> Option<&Self> {
 		Some(object)
 	}
 
-	fn downcast_mut(object: &mut Object) -> Option<&mut Self> {
+	fn downcast_mut(object: &mut AnyObject) -> Option<&mut Self> {
 		Some(object)
 	}
 }
 
 pub struct Objects {
-	vec: Vec<Option<Object>>,
+	vec: Vec<Option<AnyObject>>,
 }
 
 impl Objects {
@@ -43,12 +44,12 @@ impl Objects {
 		Self { vec: Vec::with_capacity(2) } // ensure we at least have the capacity for the Display at ID 1
 	}
 
-	pub fn insert<T: ObjectType>(&mut self, id: Id<T>, obj: T) -> Result<OccupiedEntry<'_, T>> {
+	pub fn insert<T: Object>(&mut self, id: Id<T>, obj: T) -> Result<OccupiedEntry<'_, T>> {
 		let [entry] = self.get_many_mut([id.cast()])?;
 		Ok(entry.into_vacant()?.downcast().insert(obj))
 	}
 
-	pub fn get_many_mut<const N: usize>(&mut self, ids: [Id<Object>; N]) -> Result<[Entry<'_, Object>; N]> {
+	pub fn get_many_mut<const N: usize>(&mut self, ids: [Id<AnyObject>; N]) -> Result<[Entry<'_, AnyObject>; N]> {
 		let mut new_len = self.vec.len();
 		for (i, &id) in ids.iter().enumerate() {
 			for &id2 in &ids[..i] {
@@ -63,7 +64,7 @@ impl Objects {
 		let ret = unsafe {
 			let (slice_ptr, slice_len) = (self.vec.as_mut_ptr(), self.vec.len());
 			// Safety: fully uninitialized is a valid bit-pattern for [MaybeUninit<T>; N]
-			let mut ret: [MaybeUninit<Entry<'_, Object>>; N] = MaybeUninit::uninit().assume_init();
+			let mut ret: [MaybeUninit<Entry<'_, AnyObject>>; N] = MaybeUninit::uninit().assume_init();
 			for ret_idx in 0..N {
 				let id = ids[ret_idx];
 				let object_idx = id.into_usize();
@@ -81,20 +82,13 @@ impl Objects {
 		Ok(ret)
 	}
 
-	pub fn dispatch_request(
-		&mut self,
-		client: &mut client::SendHalf<'_>,
-		id: Id<Object>,
-		opcode: u16,
-		args: Args<'_>,
-	) -> Result<()> {
-		let handler = match self.vec.get(id.into_usize()) {
-			Some(Some(Object::Display(_))) => object_impls::Display::handle_request,
-			Some(Some(Object::Callback(_))) => object_impls::Callback::handle_request,
-			Some(Some(Object::Registry(_))) => object_impls::Registry::handle_request,
-			None | Some(None) => return Ok(()),
-		};
-		handler(self, id, client, opcode, args)
+	pub fn dispatch_request(&mut self, client: &mut client::SendHalf<'_>, message: RecvMessage<'_>) -> Result<()> {
+		let id = message.object_id();
+		match self.vec.get(id.into_usize()) {
+			Some(Some(obj)) => (obj.request_handler())(self, client, message),
+			Some(None) => Ok(()), // ignore requests to an object that existed but was deleted
+			None => Err(Error::new(ErrorKind::InvalidInput, format!("object {id} does not exist"))),
+		}
 	}
 }
 
@@ -115,8 +109,8 @@ pub enum Entry<'a, T> {
 	Vacant(VacantEntry<'a, T>),
 }
 
-impl<'a> Entry<'a, Object> {
-	fn new(id: Id<Object>, slot: &'a mut Option<Object>) -> Self {
+impl<'a> Entry<'a, AnyObject> {
+	fn new(id: Id<AnyObject>, slot: &'a mut Option<AnyObject>) -> Self {
 		if slot.is_some() {
 			Self::Occupied(OccupiedEntry { id, slot })
 		} else {
@@ -144,11 +138,11 @@ impl<'a, T> Entry<'a, T> {
 #[derive(Debug)]
 pub struct OccupiedEntry<'a, T> {
 	id: Id<T>,
-	slot: &'a mut Option<Object>,
+	slot: &'a mut Option<AnyObject>,
 }
 
-impl<'a> OccupiedEntry<'a, Object> {
-	pub fn downcast<T: ObjectType>(self) -> Result<OccupiedEntry<'a, T>> {
+impl<'a> OccupiedEntry<'a, AnyObject> {
+	pub fn downcast<T: Object>(self) -> Result<OccupiedEntry<'a, T>> {
 		if T::downcast_ref(&*self).is_some() {
 			Ok(OccupiedEntry { id: self.id.cast(), slot: self.slot })
 		} else {
@@ -157,7 +151,7 @@ impl<'a> OccupiedEntry<'a, Object> {
 	}
 }
 
-impl<'a, T: ObjectType> OccupiedEntry<'a, T> {
+impl<'a, T: Object> OccupiedEntry<'a, T> {
 	pub fn id(&self) -> Id<T> {
 		self.id
 	}
@@ -171,7 +165,7 @@ impl<'a, T: ObjectType> OccupiedEntry<'a, T> {
 	}
 }
 
-impl<'a, T: ObjectType> Deref for OccupiedEntry<'a, T> {
+impl<'a, T: Object> Deref for OccupiedEntry<'a, T> {
 	type Target = T;
 
 	fn deref(&self) -> &Self::Target {
@@ -182,7 +176,7 @@ impl<'a, T: ObjectType> Deref for OccupiedEntry<'a, T> {
 	}
 }
 
-impl<'a, T: ObjectType> DerefMut for OccupiedEntry<'a, T> {
+impl<'a, T: Object> DerefMut for OccupiedEntry<'a, T> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		match self.slot.as_mut() {
 			Some(obj) => T::downcast_mut(obj).unwrap(),
@@ -194,16 +188,16 @@ impl<'a, T: ObjectType> DerefMut for OccupiedEntry<'a, T> {
 #[derive(Debug)]
 pub struct VacantEntry<'a, T> {
 	id: Id<T>,
-	slot: &'a mut Option<Object>,
+	slot: &'a mut Option<AnyObject>,
 }
 
-impl<'a> VacantEntry<'a, Object> {
-	pub fn downcast<T: ObjectType>(self) -> VacantEntry<'a, T> {
+impl<'a> VacantEntry<'a, AnyObject> {
+	pub fn downcast<T: Object>(self) -> VacantEntry<'a, T> {
 		VacantEntry { id: self.id.cast(), slot: self.slot }
 	}
 }
 
-impl<'a, T: ObjectType> VacantEntry<'a, T> {
+impl<'a, T: Object> VacantEntry<'a, T> {
 	pub fn id(&self) -> Id<T> {
 		self.id
 	}
