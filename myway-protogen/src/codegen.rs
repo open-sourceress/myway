@@ -1,4 +1,4 @@
-use crate::types::{Arg, ArgType, Enum, Interface, Protocol};
+use crate::types::{Arg, ArgType, Enum, Interface, Message, Protocol};
 use std::{
 	fmt::{self, Display, Formatter, Write as _},
 	io::{Result, Write},
@@ -81,10 +81,10 @@ fn emit_interface(dest: &mut impl Write, iface: &Interface, impl_type: Option<&s
 	writeln!(dest, "pub mod {} {{", iface.name)?;
 	writeln!(dest, "\tuse crate::client::{{RecvMessage, SendMessage, SendHalf}};")?;
 	writeln!(dest, "\tuse crate::object_map::{{Objects, OccupiedEntry, VacantEntry}};")?;
-	writeln!(dest, "\tuse crate::protocol::{{Fd, Fixed, DecodeArg, Id, EncodeArg}};")?;
+	writeln!(dest, "\tuse crate::protocol::{{Word, Fd, Fixed, DecodeArg, Id, EncodeArg}};")?;
 	writeln!(dest, "\tuse super::AnyObject;")?;
 	writeln!(dest, "\tuse log::trace;")?;
-	writeln!(dest, "\tuse std::io::{{self, ErrorKind, Result}};")?;
+	writeln!(dest, "\tuse std::{{io::{{self, ErrorKind, Result}}, os::unix::io::AsRawFd}};")?;
 	writeln!(dest, "\t#[allow(clippy::too_many_arguments)]")?;
 
 	writeln!(dest, "\tpub trait {trait_name}: Sized {{")?;
@@ -129,8 +129,9 @@ fn emit_interface(dest: &mut impl Write, iface: &Interface, impl_type: Option<&s
 				write!(dest, ", {}: {}", arg.name, RustArgType(arg.ty, TypePosition::Event))?;
 			}
 			writeln!(dest, ") -> Result<()> {{")?;
+			emit_log(dest, "\t\t\t", "event", ev)?;
 			writeln!(dest, "\t\t\t#[allow(clippy::identity_op)]")?;
-			write!(dest, "\t\t\tlet (mut len, mut fds) = (0, 0);")?;
+			writeln!(dest, "\t\t\tlet (mut len, mut fds) = (0, 0);")?;
 			for arg in &ev.args {
 				writeln!(dest, "\t\t\tlen += {}.encoded_len();", arg.name)?;
 				writeln!(dest, "\t\t\tfds += {}.is_fd() as usize;", arg.name)?;
@@ -169,7 +170,7 @@ fn emit_request_handler(dest: &mut impl Write, iface: &Interface<'_>) -> Result<
 		"\t\tpub fn handle_request(objects: &mut Objects, client: &mut SendHalf<'_>, mut message: RecvMessage<'_>) -> \
 		 Result<()> {{"
 	)?;
-	writeln!(dest, "\t\t\tlet this_id = message.object_id();")?;
+	writeln!(dest, "\t\t\tlet self_id = message.object_id();")?;
 	writeln!(dest, "\t\t\tmatch message.opcode() {{")?;
 	for (i, req) in iface.requests.iter().enumerate() {
 		writeln!(dest, "\t\t\t\t{i} => {{")?;
@@ -188,9 +189,11 @@ fn emit_request_handler(dest: &mut impl Write, iface: &Interface<'_>) -> Result<
 			)?;
 		}
 		writeln!(dest, "\t\t\t\t\tmessage.finish()?;")?;
+		emit_log(dest, "\t\t\t\t\t", "request", req)?;
+
 		writeln!(
 			dest,
-			"\t\t\t\t\tlet [this{args}] = objects.get_many_mut([this_id{args}])?;",
+			"\t\t\t\t\tlet [this{args}] = objects.get_many_mut([self_id{args}])?;",
 			args = IdArgs(&req.args)
 		)?;
 		writeln!(dest, "\t\t\t\t\tlet mut this = this.into_occupied()?.downcast::<Self>()?;")?;
@@ -218,11 +221,49 @@ fn emit_request_handler(dest: &mut impl Write, iface: &Interface<'_>) -> Result<
 	}
 	writeln!(dest, "\t\t\t\t_ => {{")?;
 	// ignore unused_variables for arguments without suppressing the lint for the entire function
-	writeln!(dest, "\t\t\t\t\tlet _ = (objects, client, this_id);")?;
+	writeln!(dest, "\t\t\t\t\tlet _ = (objects, client, self_id);")?;
 	writeln!(dest, "\t\t\t\t\tErr(io::Error::new(ErrorKind::InvalidInput, \"unknown request opcode {{opcode}}\"))")?;
 	writeln!(dest, "\t\t\t\t}},")?; // match arm
 	writeln!(dest, "\t\t\t}}")?; // match body
 	writeln!(dest, "\t\t}}")?; // method body
+	Ok(())
+}
+
+/// Emit code to log a message in WAYLAND_DEBUG-compatible format.
+fn emit_log(dest: &mut impl Write, indent: &str, kind: &str, message: &Message) -> Result<()> {
+	writeln!(
+		dest,
+		"{indent}if let Some(mut log) = crate::logging::log_{kind}(Self::INTERFACE, {:?}, self_id.into()) {{",
+		message.name
+	)?;
+	for &Arg { name, ty, .. } in &message.args {
+		match ty {
+			ArgType::Uint | ArgType::Int | ArgType::Fixed | ArgType::String { nullable: false } => {
+				writeln!(dest, "{indent}\tlog.arg_debug({name});")?
+			},
+			ArgType::Enum(_) => writeln!(dest, "{indent}\tlog.arg_debug({name} as u32);")?,
+			ArgType::String { nullable: true } => {
+				writeln!(dest, "{indent}\tmatch {name} {{")?;
+				writeln!(dest, "{indent}\t\tSome(arg) => log.arg_debug(arg),")?;
+				writeln!(dest, "{indent}\t\tNone => log.arg_nil(),")?;
+				writeln!(dest, "{indent}\t}}")?;
+			},
+			ArgType::Object { interface, nullable: false } => {
+				writeln!(dest, "{indent}\tlog.arg_object({interface:?}, {name}.into());")?
+			},
+			ArgType::Object { interface, nullable: true } => {
+				writeln!(dest, "{indent}\tmatch {name} {{")?;
+				writeln!(dest, "{indent}\t\tSome(id) => log.arg_object({interface:?}, id.into()),")?;
+				writeln!(dest, "{indent}\t\tNone => log.arg_nil(),")?;
+				writeln!(dest, "{indent}\t}}")?;
+			},
+			ArgType::NewId { interface } => writeln!(dest, "{indent}\tlog.arg_new_id({interface:?}, {name}.into());")?,
+			ArgType::Array => writeln!(dest, "{indent}\tlog.arg_array({name});")?,
+			ArgType::Fd => writeln!(dest, "{indent}\tlog.arg_fd(&{name});")?,
+		}
+	}
+	writeln!(dest, "{indent}\tlog.finish();")?;
+	writeln!(dest, "{indent}}}")?;
 	Ok(())
 }
 

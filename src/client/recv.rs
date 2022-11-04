@@ -3,7 +3,6 @@ use crate::{
 	cvt_poll,
 	protocol::{AnyObject, Id, Word, WORD_SIZE},
 };
-use log::trace;
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use std::{
 	io::{Error, ErrorKind, IoSliceMut, Result},
@@ -70,25 +69,17 @@ fn fill_words<'b>(
 	while buf.write_idx - buf.read_idx < byte_len {
 		let space = &mut bytes[buf.write_idx..];
 
-		trace!(
-			"> recvmsg(sockfd={}, iov[0]=[len={}], control[0]=[len={}], flags={:?})",
-			sock.as_raw_fd(),
-			space.len(),
-			cmsg_buf.len(),
-			MsgFlags::MSG_CMSG_CLOEXEC
-		);
 		let msg = ready!(cvt_poll(recvmsg::<()>(
 			sock.as_raw_fd(),
 			&mut [IoSliceMut::new(space)],
 			Some(cmsg_buf),
 			MsgFlags::MSG_CMSG_CLOEXEC
 		)))?;
-		trace!("< bytes={}, flags={:?}", msg.bytes, msg.flags);
 		if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
 			todo!("shut down connection, file descriptor discarded");
 		}
-		for msg in msg.cmsgs() {
-			if let ControlMessageOwned::ScmRights(msg_fds) = msg {
+		for ctl in msg.cmsgs() {
+			if let ControlMessageOwned::ScmRights(msg_fds) = ctl {
 				let n = Ord::min(msg_fds.len(), CAP_FDS - fds.write_idx);
 				fds.buf[fds.write_idx..fds.write_idx + n].copy_from_slice(&msg_fds[..n]);
 				if n < msg_fds.len() {

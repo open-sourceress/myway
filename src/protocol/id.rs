@@ -74,6 +74,12 @@ impl<T> Ord for Id<T> {
 	}
 }
 
+impl<T> From<Id<T>> for NonZeroU32 {
+	fn from(id: Id<T>) -> Self {
+		id.0
+	}
+}
+
 impl<T> From<Id<T>> for u32 {
 	fn from(id: Id<T>) -> Self {
 		id.0.get()

@@ -1,11 +1,10 @@
-use crate::Fd;
 use log::trace;
 use nix::{
 	sys::epoll::{epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp},
 	Result,
 };
 use std::{
-	os::unix::io::{AsRawFd, FromRawFd},
+	os::unix::io::{AsRawFd, FromRawFd, OwnedFd},
 	time::Duration,
 };
 
@@ -13,36 +12,29 @@ pub type Event = EpollEvent;
 
 #[derive(Debug)]
 pub struct Epoll {
-	epfd: Fd,
+	epfd: OwnedFd,
 }
 
 impl Epoll {
 	pub fn new() -> Result<Self> {
 		let epfd = epoll_create1(EpollCreateFlags::EPOLL_CLOEXEC)?;
 		// Safety: epoll_create1 returns a newly created file descriptor which we immediately wrap
-		let epfd = unsafe { Fd::from_raw_fd(epfd) };
+		let epfd = unsafe { OwnedFd::from_raw_fd(epfd) };
 		trace!("created epollfd {epfd:?}");
-
 		Ok(Self { epfd })
 	}
 
 	pub fn register(&self, fd: &impl AsRawFd, flags: Interest, key: u64) -> Result<()> {
+		let epfd = self.epfd.as_raw_fd();
 		let fd = fd.as_raw_fd();
-		epoll_ctl(
-			self.epfd.as_raw_fd(),
-			EpollOp::EpollCtlAdd,
-			fd,
-			&mut Some(EpollEvent::new(flags | EpollFlags::EPOLLET, key)),
-		)?;
-		trace!("registered fd {fd} with epoll");
+		epoll_ctl(epfd, EpollOp::EpollCtlAdd, fd, &mut Some(EpollEvent::new(flags | EpollFlags::EPOLLET, key)))?;
+		trace!("registered fd {fd} with epoll {epfd}");
 		Ok(())
 	}
 
 	pub fn wait_for_activity<'e>(&self, events: &'e mut [Event], timeout: Option<Duration>) -> Result<&'e [Event]> {
 		let timeout = timeout.map_or(-1, |d| d.as_millis() as _);
-		trace!("> epoll_wait(epfd={}, events=[len={}], timeout_ms={timeout})", self.epfd.as_raw_fd(), events.len());
 		let n = epoll_wait(self.epfd.as_raw_fd(), events, timeout)?;
-		trace!("< {n}");
 		Ok(&events[..n])
 	}
 }

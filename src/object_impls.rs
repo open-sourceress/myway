@@ -10,12 +10,12 @@ use crate::{
 		AnyObject, Fd, Id,
 	},
 };
-use log::{info, trace};
+use log::info;
 use nix::sys::mman::{mmap, mremap, MRemapFlags, MapFlags, ProtFlags};
 use std::{
 	ffi::c_void,
 	io::{Error, ErrorKind, Result},
-	os::unix::prelude::AsRawFd,
+	os::unix::io::AsRawFd,
 	ptr,
 };
 
@@ -102,26 +102,15 @@ impl WlShm for ShmGlobal {
 				return Err(Error::new(ErrorKind::InvalidInput, "size must be nonnegative"));
 			},
 		};
-		// Safety: we have to rely on the client to be good and not do anything we wouldn't do with the backing memory
-		let ptr = unsafe {
-			trace!(
-				"> mmap(addr=(null), length={size}, prot={:?}, flags={:?}, fd={}, offset=0)",
-				ProtFlags::PROT_READ,
-				MapFlags::MAP_SHARED,
-				fd.as_raw_fd(),
-			);
-			let res = mmap(ptr::null_mut(), size, ProtFlags::PROT_READ, MapFlags::MAP_SHARED, fd.as_raw_fd(), 0);
-			match res {
-				Ok(ptr) => {
-					trace!("< {ptr:p}");
-					ptr
-				},
+		// XXX does calling mmap have safety preconditions separate from safely using the new memory?
+		let ptr =
+			match unsafe { mmap(ptr::null_mut(), size, ProtFlags::PROT_READ, MapFlags::MAP_SHARED, fd.as_raw_fd(), 0) }
+			{
+				Ok(ptr) => ptr,
 				Err(err) => {
-					trace!("< {err}");
 					return Err(Error::new(ErrorKind::InvalidInput, format!("mapping file descriptor failed: {err}")));
 				},
-			}
-		};
+			};
 		id.insert(ShmPool { ptr, size });
 		Ok(())
 	}
@@ -165,31 +154,12 @@ impl WlShmPool for ShmPool {
 				return Err(Error::new(ErrorKind::InvalidInput, "size must be nonnegative"));
 			},
 		};
-		// Safety: like mmap, dependent on the caller
-		let ptr = unsafe {
-			trace!(
-				"> mremap(addr={:p}, old_size={:?}, new_size={:?}, flags={:?}, new_address={:?}",
-				self.ptr,
-				self.size,
-				size,
-				MRemapFlags::MREMAP_MAYMOVE,
-				None::<*mut c_void>
-			);
-			let res = mremap(self.ptr, self.size, size, MRemapFlags::MREMAP_MAYMOVE, None);
-
-			match res {
-				Ok(ptr) => {
-					trace!("< {ptr:p}");
-					ptr
-				},
-				Err(err) => {
-					trace!("< {err}");
-					return Err(Error::new(
-						ErrorKind::InvalidInput,
-						format!("remapping file descriptor failed: {err}"),
-					));
-				},
-			}
+		// XXX does calling mremap have safety preconditions separate from safely using the new memory?
+		let ptr = match unsafe { mremap(self.ptr, self.size, size, MRemapFlags::MREMAP_MAYMOVE, None) } {
+			Ok(ptr) => ptr,
+			Err(err) => {
+				return Err(Error::new(ErrorKind::InvalidInput, format!("remapping file descriptor failed: {err}")));
+			},
 		};
 		self.ptr = ptr;
 		self.size = size;

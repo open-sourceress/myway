@@ -2,7 +2,7 @@ use self::{
 	accept::Accept,
 	client::Client,
 	epoll::{Epoll, Event, EPOLLIN, EPOLLOUT},
-	fds::{catch_sigint, Fd},
+	signals::catch_sigint,
 };
 use clap::Parser;
 use log::{debug, info, trace, warn};
@@ -16,11 +16,11 @@ use std::{
 mod accept;
 mod client;
 mod epoll;
-mod fds;
-mod logger;
+mod logging;
 mod object_impls;
 mod object_map;
 mod protocol;
+mod signals;
 
 /// Wayland compositor
 #[derive(Debug, Parser)]
@@ -36,7 +36,7 @@ const ACCEPT_KEY: u64 = u64::MAX;
 const SIGNAL_KEY: u64 = u64::MAX - 1;
 
 fn main() -> io::Result<()> {
-	logger::init();
+	env_logger::init();
 	let CliArgs { socket_path } = CliArgs::parse();
 	let socket_path = match socket_path {
 		Some(path) => path,

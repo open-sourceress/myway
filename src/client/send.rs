@@ -7,7 +7,7 @@ use log::trace;
 use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
 use std::{
 	io::{Error, ErrorKind, IoSlice, Result},
-	os::unix::{net::UnixStream, prelude::AsRawFd},
+	os::unix::{io::AsRawFd, net::UnixStream},
 	task::{ready, Poll},
 };
 
@@ -94,15 +94,15 @@ impl<'c> SendHalf<'c> {
 	pub fn poll_flush(&mut self) -> Poll<Result<()>> {
 		while self.bytes.read_idx < self.bytes.write_idx || self.fds.read_idx < self.fds.write_idx {
 			let buf_bytes = Buffer::bytes(&self.bytes.buf);
-			let bytes = IoSlice::new(&buf_bytes[self.bytes.read_idx..self.bytes.write_idx]);
+			let bytes = &buf_bytes[self.bytes.read_idx..self.bytes.write_idx];
 			let fds = ControlMessage::ScmRights(&self.fds.buf[self.fds.read_idx..self.fds.write_idx]);
-			trace!(
-				"> sendmsg(sockfd={}, iov[0]=[len={}], control[0]={fds:?}, flags=0)",
+			let n = ready!(cvt_poll(sendmsg(
 				self.sock.as_raw_fd(),
-				bytes.len()
-			);
-			let n = ready!(cvt_poll(sendmsg::<()>(self.sock.as_raw_fd(), &[bytes], &[fds], MsgFlags::empty(), None)))?;
-			trace!("< {n}");
+				&[IoSlice::new(bytes)],
+				&[fds],
+				MsgFlags::empty(),
+				None::<&()>
+			)))?;
 			self.bytes.read_idx += n;
 			// XXX can sendmsg send partial ancillary data, and how is that reported?
 			self.fds.read_idx = self.fds.write_idx;
@@ -131,6 +131,7 @@ impl<'c> SendMessage<'c> {
 	pub fn write(&mut self, word: Word) {
 		self.write_all(&[word])
 	}
+
 	pub fn write_all(&mut self, words: &[Word]) {
 		assert!(self.words_idx + words.len() <= self.words_goal, "message overran requested byte buffers");
 		self.bytes.buf[self.words_idx..self.words_idx + words.len()].copy_from_slice(words);
