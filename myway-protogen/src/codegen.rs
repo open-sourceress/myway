@@ -11,6 +11,7 @@ static IMPL_TYPES: &[(&str, &str)] = &[
 	("wl_registry", "crate::object_impls::Registry"),
 	("wl_shm", "crate::object_impls::ShmGlobal"),
 	("wl_shm_pool", "crate::object_impls::ShmPool"),
+	("wl_buffer", "crate::object_impls::ShmBuffer"),
 ];
 
 /// Find the Rust implementation type for a given protocol interface.
@@ -118,6 +119,7 @@ fn emit_interface(dest: &mut impl Write, iface: &Interface, impl_type: Option<&s
 		writeln!(dest, "\t\tpub const VERSION: u32 = {};", iface.version)?;
 		emit_request_handler(dest, iface)?;
 		for (opcode, ev) in iface.events.iter().enumerate() {
+			writeln!(dest, "\t\t#[allow(unused_mut)]")?;
 			write!(dest, "\t\tpub fn send_{}(", ev.name)?;
 			if ev.kind == Some("destructor") {
 				write!(dest, "self")?;
@@ -130,7 +132,6 @@ fn emit_interface(dest: &mut impl Write, iface: &Interface, impl_type: Option<&s
 			}
 			writeln!(dest, ") -> Result<()> {{")?;
 			emit_log(dest, "\t\t\t", "event", ev)?;
-			writeln!(dest, "\t\t\t#[allow(clippy::identity_op)]")?;
 			writeln!(dest, "\t\t\tlet (mut len, mut fds) = (0, 0);")?;
 			for arg in &ev.args {
 				writeln!(dest, "\t\t\tlen += {}.encoded_len();", arg.name)?;
@@ -231,6 +232,7 @@ fn emit_request_handler(dest: &mut impl Write, iface: &Interface<'_>) -> Result<
 
 /// Emit code to log a message in WAYLAND_DEBUG-compatible format.
 fn emit_log(dest: &mut impl Write, indent: &str, kind: &str, message: &Message) -> Result<()> {
+	writeln!(dest, "{indent}#[allow(unused_mut)]")?; // messages with no args
 	writeln!(
 		dest,
 		"{indent}if let Some(mut log) = crate::logging::log_{kind}(Self::INTERFACE, {:?}, self_id.into()) {{",

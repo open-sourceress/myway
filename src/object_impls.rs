@@ -2,21 +2,21 @@ use crate::{
 	client::SendHalf,
 	object_map::VacantEntry,
 	protocol::{
+		wl_buffer::WlBuffer,
 		wl_callback::WlCallback,
 		wl_display::WlDisplay,
 		wl_registry::WlRegistry,
-		wl_shm::{self, WlShm},
+		wl_shm::{Format, WlShm},
 		wl_shm_pool::WlShmPool,
 		AnyObject, Fd, Id,
 	},
+	shm::ShmBlock,
 };
 use log::info;
-use nix::sys::mman::{mmap, mremap, MRemapFlags, MapFlags, ProtFlags};
 use std::{
-	ffi::c_void,
+	cell::RefCell,
 	io::{Error, ErrorKind, Result},
-	os::unix::io::AsRawFd,
-	ptr,
+	rc::Rc,
 };
 
 #[derive(Debug)]
@@ -81,8 +81,8 @@ pub struct ShmGlobal;
 
 impl ShmGlobal {
 	fn send_formats(&self, self_id: Id<Self>, client: &mut SendHalf<'_>) -> Result<()> {
-		self.send_format(self_id, client, wl_shm::Format::Argb8888)?;
-		self.send_format(self_id, client, wl_shm::Format::Xrgb8888)?;
+		self.send_format(self_id, client, Format::Argb8888)?;
+		self.send_format(self_id, client, Format::Xrgb8888)?;
 		Ok(())
 	}
 }
@@ -103,42 +103,48 @@ impl WlShm for ShmGlobal {
 			},
 		};
 		// XXX does calling mmap have safety preconditions separate from safely using the new memory?
-		let ptr =
-			match unsafe { mmap(ptr::null_mut(), size, ProtFlags::PROT_READ, MapFlags::MAP_SHARED, fd.as_raw_fd(), 0) }
-			{
-				Ok(ptr) => ptr,
-				Err(err) => {
-					return Err(Error::new(ErrorKind::InvalidInput, format!("mapping file descriptor failed: {err}")));
-				},
-			};
-		id.insert(ShmPool { ptr, size });
+		let block = ShmBlock::new(fd, size)?;
+		id.insert(ShmPool(Rc::new(RefCell::new(block))));
 		Ok(())
 	}
 }
 
 #[derive(Debug)]
-pub struct ShmPool {
-	ptr: *mut c_void,
-	size: usize,
-}
+pub struct ShmPool(Rc<RefCell<ShmBlock>>);
 
 impl WlShmPool for ShmPool {
 	fn handle_create_buffer(
 		&mut self,
 		_client: &mut SendHalf<'_>,
-		id: VacantEntry<'_, AnyObject>,
+		id: VacantEntry<'_, ShmBuffer>,
 		offset: i32,
 		width: i32,
 		height: i32,
 		stride: i32,
-		format: wl_shm::Format,
+		format: Format,
 	) -> Result<()> {
 		info!(
 			"wl_shm_pool.create_buffer(id={:?}, offset={offset:?}, width={width:?}, height={height:?}, \
 			 stride={stride:?}, format={format:?})",
 			id.id(),
 		);
-		todo!()
+		let offset = offset
+			.try_into()
+			.map_err(|_| Error::new(ErrorKind::InvalidInput, format!("buffer offset {offset} is negative")))?;
+		let width = width
+			.try_into()
+			.map_err(|_| Error::new(ErrorKind::InvalidInput, format!("buffer width {width} is negative")))?;
+		let height = height
+			.try_into()
+			.map_err(|_| Error::new(ErrorKind::InvalidInput, format!("buffer height {height} is negative")))?;
+		let stride = stride
+			.try_into()
+			.map_err(|_| Error::new(ErrorKind::InvalidInput, format!("buffer stride {stride} is negative")))?;
+		if !matches!(format, Format::Argb8888 | Format::Xrgb8888) {
+			return Err(Error::new(ErrorKind::InvalidInput, "unsupported format"));
+		}
+		id.insert(ShmBuffer { memory: self.0.clone(), offset, width, height, stride, format });
+		Ok(())
 	}
 
 	fn handle_destroy(self, _client: &mut SendHalf<'_>) -> Result<()> {
@@ -148,21 +154,25 @@ impl WlShmPool for ShmPool {
 
 	fn handle_resize(&mut self, _client: &mut SendHalf<'_>, size: i32) -> Result<()> {
 		info!("wl_shm_pool.resize(size={size:?})");
-		let size = match size.try_into() {
-			Ok(n) => n,
-			Err(_) => {
-				return Err(Error::new(ErrorKind::InvalidInput, "size must be nonnegative"));
-			},
-		};
-		// XXX does calling mremap have safety preconditions separate from safely using the new memory?
-		let ptr = match unsafe { mremap(self.ptr, self.size, size, MRemapFlags::MREMAP_MAYMOVE, None) } {
-			Ok(ptr) => ptr,
-			Err(err) => {
-				return Err(Error::new(ErrorKind::InvalidInput, format!("remapping file descriptor failed: {err}")));
-			},
-		};
-		self.ptr = ptr;
-		self.size = size;
+		match size.try_into() {
+			Ok(size) => self.0.borrow_mut().grow(size),
+			Err(_) => Err(Error::new(ErrorKind::InvalidInput, "size is negative")),
+		}
+	}
+}
+
+#[derive(Debug)]
+pub struct ShmBuffer {
+	memory: Rc<RefCell<ShmBlock>>,
+	offset: u32,
+	width: u32,
+	height: u32,
+	stride: u32,
+	format: Format,
+}
+
+impl WlBuffer for ShmBuffer {
+	fn handle_destroy(self, _client: &mut SendHalf<'_>) -> Result<()> {
 		Ok(())
 	}
 }

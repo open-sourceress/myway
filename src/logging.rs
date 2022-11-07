@@ -61,6 +61,7 @@ impl LogMessage {
 		let _ = write!(self.buffer, "{arg:?}, ");
 	}
 
+	#[allow(dead_code)]
 	pub fn arg_nil(&mut self) {
 		self.buffer.push_str("nil, ");
 	}
@@ -73,6 +74,7 @@ impl LogMessage {
 		let _ = write!(self.buffer, "new id {}@{id}, ", interface.unwrap_or("[unknown]"));
 	}
 
+	#[allow(dead_code)]
 	pub fn arg_array(&mut self, arg: &[u32]) {
 		let _ = write!(self.buffer, "array[{}], ", arg.len());
 	}

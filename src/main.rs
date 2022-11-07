@@ -20,6 +20,7 @@ mod logging;
 mod object_impls;
 mod object_map;
 mod protocol;
+mod shm;
 mod signals;
 
 /// Wayland compositor

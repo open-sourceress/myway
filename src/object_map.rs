@@ -143,7 +143,7 @@ pub struct OccupiedEntry<'a, T> {
 
 impl<'a> OccupiedEntry<'a, AnyObject> {
 	pub fn downcast<T: Object>(self) -> Result<OccupiedEntry<'a, T>> {
-		if T::downcast_ref(&*self).is_some() {
+		if T::downcast_ref(&self).is_some() {
 			Ok(OccupiedEntry { id: self.id.cast(), slot: self.slot })
 		} else {
 			Err(Error::new(ErrorKind::InvalidInput, format!("ID {} is not the correct type", self.id)))
