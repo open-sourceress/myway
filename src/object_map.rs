@@ -5,7 +5,6 @@ use crate::{
 use std::{
 	fmt,
 	io::{Error, ErrorKind, Result},
-	mem::MaybeUninit,
 	ops::{Deref, DerefMut},
 };
 
@@ -45,39 +44,43 @@ impl Objects {
 	}
 
 	pub fn insert<T: Object>(&mut self, id: Id<T>, obj: T) -> Result<OccupiedEntry<'_, T>> {
-		let [entry] = self.get_many_mut([id.cast()])?;
-		Ok(entry.into_vacant()?.downcast().insert(obj))
+		let [entry] = self.get_many_mut([Some(id.cast())])?;
+		Ok(entry.unwrap().into_vacant()?.downcast().insert(obj))
 	}
 
-	pub fn get_many_mut<const N: usize>(&mut self, ids: [Id<AnyObject>; N]) -> Result<[Entry<'_, AnyObject>; N]> {
+	pub fn get_many_mut<const N: usize>(
+		&mut self,
+		ids: [Option<Id<AnyObject>>; N],
+	) -> Result<[Option<Entry<'_, AnyObject>>; N]> {
 		let mut new_len = self.vec.len();
 		for (i, &id) in ids.iter().enumerate() {
-			for &id2 in &ids[..i] {
-				if id == id2 {
-					return Err(Error::new(ErrorKind::InvalidInput, format!("requested id {id} multiple times")));
+			if let Some(id) = id {
+				for id2 in ids[..i].iter().copied().flatten() {
+					if id == id2 {
+						return Err(Error::new(ErrorKind::InvalidInput, format!("requested id {id} multiple times")));
+					}
 				}
+				new_len = new_len.max(id.into_usize() + 1);
 			}
-			new_len = new_len.max(id.into_usize() + 1);
 		}
 		// new_len starts at `self.vec.len()` and only goes up, so this will never shrink the vec
 		self.vec.resize_with(new_len, || None);
 		let ret = unsafe {
 			let (slice_ptr, slice_len) = (self.vec.as_mut_ptr(), self.vec.len());
-			// Safety: fully uninitialized is a valid bit-pattern for [MaybeUninit<T>; N]
-			let mut ret: [MaybeUninit<Entry<'_, AnyObject>>; N] = MaybeUninit::uninit().assume_init();
+			let mut ret: [Option<Entry<'_, AnyObject>>; N] = std::array::from_fn(|_| None);
 			for ret_idx in 0..N {
-				let id = ids[ret_idx];
-				let object_idx = id.into_usize();
-				debug_assert!(object_idx < slice_len); // This is ensured by the resize_with above, so only debug_assert
+				if let Some(id) = ids[ret_idx] {
+					let object_idx = id.into_usize();
+					debug_assert!(object_idx < slice_len); // This is ensured by the resize_with above, so only debug_assert
 
-				// Safety: resize_with ensures that object_ptr is within the backing allocation of `self.vec`, and the
-				// nested loop ensures no index is present twice and so at most one mutable reference is created for
-				// each element of the slice.
-				let object_ref = &mut *slice_ptr.add(object_idx);
-				ret[ret_idx].write(Entry::new(id, object_ref));
+					// Safety: resize_with ensures that object_ptr is within the backing allocation of `self.vec`, and
+					// the nested loop ensures no index is present twice and so at most one mutable reference is created
+					// for each element of the slice.
+					let object_ref = &mut *slice_ptr.add(object_idx);
+					ret[ret_idx] = Some(Entry::new(id, object_ref));
+				}
 			}
-			// Safety: every slot in `ret` was initialized by the loop above
-			ret.map(|slot| slot.assume_init())
+			ret
 		};
 		Ok(ret)
 	}

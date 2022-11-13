@@ -61,6 +61,14 @@ impl ShmBlock {
 		}
 		Ok(())
 	}
+
+	pub fn as_ptr(&self) -> *const u8 {
+		self.ptr.cast()
+	}
+
+	pub fn len(&self) -> usize {
+		self.length
+	}
 }
 
 impl Drop for ShmBlock {

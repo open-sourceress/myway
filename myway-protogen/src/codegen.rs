@@ -12,6 +12,9 @@ static IMPL_TYPES: &[(&str, &str)] = &[
 	("wl_shm", "crate::object_impls::ShmGlobal"),
 	("wl_shm_pool", "crate::object_impls::ShmPool"),
 	("wl_buffer", "crate::object_impls::ShmBuffer"),
+	("wl_compositor", "crate::object_impls::Compositor"),
+	("wl_surface", "crate::object_impls::Surface"),
+	("wl_region", "crate::object_impls::Region"),
 ];
 
 /// Find the Rust implementation type for a given protocol interface.
@@ -192,20 +195,42 @@ fn emit_request_handler(dest: &mut impl Write, iface: &Interface<'_>) -> Result<
 		writeln!(dest, "\t\t\t\t\tmessage.finish()?;")?;
 		emit_log(dest, "\t\t\t\t\t", "request", req)?;
 
-		writeln!(
-			dest,
-			"\t\t\t\t\tlet [this{args}] = objects.get_many_mut([self_id{args}])?;",
-			args = IdArgs(&req.args)
-		)?;
-		writeln!(dest, "\t\t\t\t\tlet mut this = this.into_occupied()?.downcast::<Self>()?;")?;
+		write!(dest, "\t\t\t\t\tlet [this")?;
+		for arg in &req.args {
+			if matches!(arg.ty, ArgType::Object { .. } | ArgType::NewId { .. }) {
+				write!(dest, ", {}", arg.name)?;
+			}
+		}
+		write!(dest, "] = objects.get_many_mut([Some(self_id)")?;
 		for arg in &req.args {
 			match arg.ty {
-				ArgType::Object { .. } => {
-					writeln!(dest, "\t\t\t\t\tlet {name} = {name}.into_occupied()?.downcast()?;", name = arg.name)?
+				ArgType::Object { nullable: false, .. } | ArgType::NewId { .. } => {
+					write!(dest, ", Some({})", arg.name)?
 				},
-				ArgType::NewId { .. } => {
-					writeln!(dest, "\t\t\t\t\tlet {name} = {name}.into_vacant()?.downcast();", name = arg.name)?
+				ArgType::Object { nullable: true, .. } => write!(dest, ", {}", arg.name)?,
+				_ => (),
+			}
+		}
+		writeln!(dest, "])?;")?;
+		writeln!(dest, "\t\t\t\t\tlet mut this = this.unwrap().into_occupied()?.downcast::<Self>()?;")?;
+		for arg in &req.args {
+			match arg.ty {
+				ArgType::Object { nullable: false, .. } => writeln!(
+					dest,
+					"\t\t\t\t\tlet {name} = {name}.unwrap().into_occupied()?.downcast()?;",
+					name = arg.name
+				)?,
+				ArgType::Object { nullable: true, .. } => {
+					writeln!(dest, "\t\t\t\t\tlet {name} = match {name} {{", name = arg.name)?;
+					writeln!(dest, "\t\t\t\t\t\tSome(obj) => Some(obj.into_occupied()?.downcast()?),")?;
+					writeln!(dest, "\t\t\t\t\t\tNone => None,")?;
+					writeln!(dest, "\t\t\t\t\t}};")?;
 				},
+				ArgType::NewId { .. } => writeln!(
+					dest,
+					"\t\t\t\t\tlet {name} = {name}.unwrap().into_vacant()?.downcast();",
+					name = arg.name
+				)?,
 				_ => (),
 			}
 		}
@@ -420,20 +445,5 @@ impl Display for RustArgType<'_> {
 			ArgType::Array => f.write_str("&[Word]"),
 			ArgType::Fd => f.write_str("Fd"),
 		}
-	}
-}
-
-#[derive(Copy, Clone, Debug)]
-struct IdArgs<'a>(&'a [Arg<'a>]);
-
-impl Display for IdArgs<'_> {
-	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		for arg in self.0 {
-			if matches!(arg.ty, ArgType::Object { .. } | ArgType::NewId { .. }) {
-				f.write_str(", ")?;
-				f.write_str(arg.name)?;
-			}
-		}
-		Ok(())
 	}
 }
