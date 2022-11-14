@@ -22,6 +22,7 @@ mod object_map;
 mod protocol;
 mod shm;
 mod signals;
+mod windows;
 
 /// Wayland compositor
 #[derive(Debug, Parser)]

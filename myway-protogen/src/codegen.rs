@@ -9,12 +9,17 @@ static IMPL_TYPES: &[(&str, &str)] = &[
 	("wl_display", "crate::object_impls::Display"),
 	("wl_callback", "crate::object_impls::Callback"),
 	("wl_registry", "crate::object_impls::Registry"),
-	("wl_shm", "crate::object_impls::ShmGlobal"),
-	("wl_shm_pool", "crate::object_impls::ShmPool"),
-	("wl_buffer", "crate::object_impls::ShmBuffer"),
-	("wl_compositor", "crate::object_impls::Compositor"),
-	("wl_surface", "crate::object_impls::Surface"),
-	("wl_region", "crate::object_impls::Region"),
+	("wl_shm", "crate::object_impls::shm::ShmGlobal"),
+	("wl_shm_pool", "crate::object_impls::shm::ShmPool"),
+	("wl_buffer", "crate::object_impls::shm::ShmBuffer"),
+	("wl_compositor", "crate::object_impls::window::Compositor"),
+	("wl_surface", "crate::object_impls::window::Surface"),
+	("wl_region", "crate::object_impls::window::Region"),
+	("xdg_wm_base", "crate::object_impls::window::WindowManager"),
+	("xdg_positioner", "crate::object_impls::window::Positioner"),
+	("xdg_surface", "crate::object_impls::window::XdgSurfaceImpl"),
+	("xdg_popup", "crate::object_impls::window::PopupObject"),
+	("xdg_toplevel", "crate::object_impls::window::ToplevelObject"),
 ];
 
 /// Find the Rust implementation type for a given protocol interface.
@@ -22,35 +27,7 @@ fn impl_of<'a, 'b>(iface: &'b str) -> Option<&'a str> {
 	IMPL_TYPES.iter().find(|&&(ifa, _)| ifa == iface).map(|&(_, ty)| ty)
 }
 
-pub(crate) fn emit_protocol(protocol: &Protocol<'_>, dest: &mut impl Write) -> Result<()> {
-	if let Some(c) = protocol.copyright {
-		writeln!(dest, "// Copyright of the protocol specification:")?;
-		write_multiline(dest, "// > ", [c])?;
-	}
-	writeln!(dest, "use crate::{{client::{{RecvMessage, SendHalf}}, object_map::{{Object, Objects}}}};")?;
-	writeln!(dest, "use super::Id;")?;
-	if let Some(desc) = protocol.desc {
-		write_multiline(dest, "//! ", [desc.summary, desc.description])?;
-	}
-	for iface in &protocol.interfaces {
-		emit_interface(dest, iface, impl_of(iface.name))?;
-	}
-	for &(_, ty) in IMPL_TYPES {
-		let bare_ty = ty.rsplit_once(':').map_or(ty, |(_, name)| name);
-		writeln!(dest, "impl Object for {ty} {{")?;
-		writeln!(dest, "\tfn upcast(self) -> AnyObject {{")?;
-		writeln!(dest, "\t\tAnyObject::{bare_ty}(self)")?;
-		writeln!(dest, "\t}}")?;
-		for (func, ref_sigil) in [("downcast", ""), ("downcast_ref", "&"), ("downcast_mut", "&mut ")] {
-			writeln!(dest, "\tfn {func}(object: {ref_sigil}AnyObject) -> Option<{ref_sigil}Self> {{")?;
-			writeln!(dest, "\t\tmatch object {{")?;
-			writeln!(dest, "\t\t\tAnyObject::{bare_ty}(obj) => Some(obj),")?;
-			writeln!(dest, "\t\t\t_ => None,")?;
-			writeln!(dest, "\t\t}}")?;
-			writeln!(dest, "\t}}")?;
-		}
-		writeln!(dest, "}}")?;
-	}
+pub(crate) fn emit_anyobject(dest: &mut impl Write) -> Result<()> {
 	writeln!(dest, "#[derive(Debug)]")?;
 	writeln!(dest, "pub enum AnyObject {{")?;
 	for &(_, ty) in IMPL_TYPES {
@@ -72,6 +49,37 @@ pub(crate) fn emit_protocol(protocol: &Protocol<'_>, dest: &mut impl Write) -> R
 	writeln!(dest, "\t\t}}")?;
 	writeln!(dest, "\t}}")?;
 	writeln!(dest, "}}")?;
+
+	for &(_, ty) in IMPL_TYPES {
+		let bare_ty = ty.rsplit_once(':').map_or(ty, |(_, name)| name);
+		writeln!(dest, "impl Object for {ty} {{")?;
+		writeln!(dest, "\tfn upcast(self) -> AnyObject {{")?;
+		writeln!(dest, "\t\tAnyObject::{bare_ty}(self)")?;
+		writeln!(dest, "\t}}")?;
+		for (func, ref_sigil) in [("downcast", ""), ("downcast_ref", "&"), ("downcast_mut", "&mut ")] {
+			writeln!(dest, "\tfn {func}(object: {ref_sigil}AnyObject) -> Option<{ref_sigil}Self> {{")?;
+			writeln!(dest, "\t\tmatch object {{")?;
+			writeln!(dest, "\t\t\tAnyObject::{bare_ty}(obj) => Some(obj),")?;
+			writeln!(dest, "\t\t\t_ => None,")?;
+			writeln!(dest, "\t\t}}")?;
+			writeln!(dest, "\t}}")?;
+		}
+		writeln!(dest, "}}")?;
+	}
+	Ok(())
+}
+
+pub(crate) fn emit_protocol(protocol: &Protocol<'_>, dest: &mut impl Write) -> Result<()> {
+	if let Some(c) = protocol.copyright {
+		writeln!(dest, "// Copyright of the protocol specification:")?;
+		write_multiline(dest, "// > ", [c])?;
+	}
+	if let Some(desc) = protocol.desc {
+		write_multiline(dest, "//! ", [desc.summary, desc.description])?;
+	}
+	for iface in &protocol.interfaces {
+		emit_interface(dest, iface, impl_of(iface.name))?;
+	}
 	Ok(())
 }
 

@@ -23,12 +23,17 @@ mod build_tree;
 mod codegen;
 mod types;
 
-pub fn generate(schema_path: impl AsRef<Path>, code_path: impl AsRef<Path>) -> Result<()> {
-	let schema = fs::read_to_string(schema_path)?;
-	let schema = Document::parse(&schema).map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+pub fn generate(schema_paths: &[impl AsRef<Path>], code_path: impl AsRef<Path>) -> Result<()> {
 	let mut output = BufWriter::new(File::create(code_path)?);
-	let tree = build_tree::build_protocol(&schema)?;
-	codegen::emit_protocol(&tree, &mut output)?;
+	writeln!(output, "use crate::{{client::{{RecvMessage, SendHalf}}, object_map::{{Object, Objects}}}};")?;
+	writeln!(output, "use super::Id;")?;
+	for path in schema_paths {
+		let schema = fs::read_to_string(path)?;
+		let schema = Document::parse(&schema).map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+		let tree = build_tree::build_protocol(&schema)?;
+		codegen::emit_protocol(&tree, &mut output)?;
+	}
+	codegen::emit_anyobject(&mut output)?;
 	output.flush()?;
 	Ok(())
 }
